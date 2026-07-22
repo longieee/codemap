@@ -1,0 +1,8 @@
+# local instance config (references real paths/names — not part of the shareable package)
+config/codemap.toml
+.venv/
+.install-lock
+*.candidates.json
+.harness-memory/
+__pycache__/
+*.pyc

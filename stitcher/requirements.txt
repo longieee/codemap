@@ -1,0 +1,4 @@
+# codemap stitcher dependencies. Kept minimal — the derivation is stdlib (ast/re/json);
+# only config parsing needs a lib.
+pyyaml>=6.0
+tomli>=2.0 ; python_version < "3.11"

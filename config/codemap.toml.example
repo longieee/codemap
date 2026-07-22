@@ -1,0 +1,29 @@
+# codemap configuration (template). Copy to config/codemap.toml and edit.
+# Nothing here hardcodes any private name — the tool is driven entirely by this file.
+
+[codemap]
+# Root directory that contains the repos below (absolute or relative to this file).
+workspace = "/path/to/workspace"
+# Where the served navigation-map vault lives (the prose wiki + cross_service edges).
+vault_dir = "/path/to/workspace/wiki"
+
+[repos]
+# logical-name = "relative/path/under/workspace"
+# Each repo is scanned for outbound call sites and config/IaC.
+frontend    = "frontend"
+context-svc = "context-service"
+
+[stitcher]
+languages = ["python", "javascript"]   # call-site extractors to run
+ground    = true                        # use Serena to ground candidate edges (FP control)
+
+# Optional service-registry hints: map a config-var SUFFIX to a canonical service name.
+# The stitcher auto-discovers most of these from settings/config; hints override.
+[services]
+# "frontend_base_url" = "Frontend"
+# "context_base_url"  = "ContextService"
+# "redis_host"        = "Redis"
+
+# Optional: files/globs that declare downstream services (e.g. an MCP/service registry yaml).
+[registry]
+# service_config = ["config/services.yaml"]   # entries with url: become fan-out targets

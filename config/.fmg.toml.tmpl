@@ -1,0 +1,13 @@
+# fmg config for the codemap vault. Coarse structural edges only in the default field set;
+# the runtime layer (cross_service:) is served via `xedges` / the cross_service MCP tool.
+[resolve]
+title_field = "title"
+alias_field = "aliases"
+fallback    = "filename_stem"
+
+[fields.direction]
+related_to = "bidirectional"
+
+[display]
+default_depth = 1
+max_depth     = 10
