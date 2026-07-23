@@ -72,9 +72,12 @@ def clean_ref(val, vm, res_names=None):
     m = re.fullmatch(r'var\.([a-z0-9_]+)', val)
     if m:
         return vm.get(m.group(1), m.group(1))
-    m = re.fullmatch(r'[a-z0-9_]+\.([a-z0-9_]+)\.[a-z0-9_.]+', val)  # google_TYPE.RNAME.attr
+    # google_TYPE.RNAME.attr — the first segment is a PROVIDER resource type, which always
+    # contains an underscore (google_compute_network, aws_lambda_function). Require that, so a
+    # dotted DNS name (app.example.com.) or an IP (203.0.113.10) is NOT mis-parsed as a ref.
+    m = re.fullmatch(r'([a-z][a-z0-9]*_[a-z0-9_]*)\.([a-z0-9_]+)\.[a-z0-9_.]+', val)
     if m:
-        rname = m.group(1)
+        rname = m.group(2)
         return res_names.get(rname, rname)   # prefer the resource's declared name
     return val
 
@@ -123,8 +126,18 @@ def iter_hcl_blocks(text):
 
 
 def attr(body, key):
-    m = re.search(rf'\b{re.escape(key)}\s*=\s*"?([^"\n]+?)"?\s*(?:#.*)?$', body, re.M)
+    # trailing `[ \t)}\]]*` tolerates a same-line block close, e.g. `spec { route_name = "x" }`,
+    # so nested single-line HCL blocks still yield their scalar attrs.
+    m = re.search(rf'\b{re.escape(key)}\s*=\s*"?([^"\n]+?)"?[ \t)}}\]]*(?:#.*)?$', body, re.M)
     return m.group(1).strip() if m else None
+
+
+def attr_list(body, key):
+    """Extract a list attr: `key = ["a", "b"]` → ["a", "b"] (single- or multi-line)."""
+    m = re.search(rf'\b{re.escape(key)}\s*=\s*\[(.*?)\]', body, re.S)
+    if not m:
+        return []
+    return [x.strip().strip('"') for x in m.group(1).split(",") if x.strip().strip('"')]
 
 
 def env_url_pairs(body):
@@ -188,7 +201,7 @@ class InfraExtractor:
                         self.edge(nm, sa, "runs-as", provenance=prov)
                     for envn, val in env_url_pairs(body):     # deploy-time cross-service deps
                         dst = self.hints.get(envn.lower(), None) or svc_from_urlvar(envn)
-                        self.node(dst, kind="service", source="deploy-env (no local source)")
+                        self.node(dst, kind="service", source="deploy-env (no local source)", provenance=prov)
                         self.edge(nm, dst, "deploy-env", via=envn, value=cr(val), provenance=prov)
                 elif rtype in ("google_cloud_run_service_iam_member",
                                "google_cloud_run_v2_job_iam_member",
@@ -249,6 +262,108 @@ class InfraExtractor:
                 elif rtype == "google_service_account":
                     self.node(cr(attr(body, "account_id")) or nm, kind="service-account",
                               display=attr(body, "display_name"), provenance=prov)
+                # ── DNS & domains ───────────────────────────────────────────────
+                elif rtype == "google_dns_managed_zone":
+                    self.node(nm, kind="dns-zone", dns_name=cr(attr(body, "dns_name")),
+                              repo=repo_name, provenance=prov)
+                elif rtype == "google_dns_record_set":
+                    rec = cr(attr(body, "name")) or rname
+                    rt = attr(body, "type")
+                    rrdatas = [cr(x) for x in attr_list(body, "rrdatas")]
+                    self.node(rec, kind="dns-record", record_type=rt, rrdatas=rrdatas,
+                              repo=repo_name, provenance=prov)
+                    for tgt in rrdatas:               # name → each resolved target (IP / host / resource)
+                        self.edge(rec, tgt, "dns-resolves-to", record_type=rt, provenance=prov)
+                elif rtype == "google_cloud_run_domain_mapping":
+                    domain = cr(attr(body, "name")) or rname
+                    route = cr(attr(body, "route_name"))     # spec { route_name = <service> }
+                    self.node(domain, kind="dns-domain", repo=repo_name, provenance=prov)
+                    if route:
+                        self.edge(domain, route, "domain-maps-to", provenance=prov)
+                # ── Networking ──────────────────────────────────────────────────
+                elif rtype == "google_compute_network":
+                    self.node(nm, kind="network-vpc", repo=repo_name, provenance=prov)
+                elif rtype == "google_compute_subnetwork":
+                    net = cr(attr(body, "network"))
+                    self.node(nm, kind="network-subnet", region=cr(attr(body, "region")),
+                              ip_cidr_range=attr(body, "ip_cidr_range"), network=net,
+                              repo=repo_name, provenance=prov)
+                    if net:
+                        self.edge(nm, net, "part-of-network", provenance=prov)
+                elif rtype == "google_vpc_access_connector":
+                    self.node(nm, kind="network-connector", network=cr(attr(body, "network")),
+                              region=cr(attr(body, "region")), repo=repo_name, provenance=prov)
+                elif rtype == "google_compute_firewall":
+                    net = cr(attr(body, "network"))
+                    self.node(nm, kind="firewall-rule", direction=attr(body, "direction") or "INGRESS",
+                              network=net, repo=repo_name, provenance=prov)
+                    if net:
+                        self.edge(nm, net, "firewall-allows", provenance=prov)
+                elif rtype in ("google_compute_router_nat", "google_compute_router"):
+                    self.node(nm, kind="network-nat", region=cr(attr(body, "region")),
+                              repo=repo_name, provenance=prov)
+                # ── Load balancing & edge ───────────────────────────────────────
+                elif rtype == "google_compute_url_map":
+                    default = cr(attr(body, "default_service"))
+                    self.node(nm, kind="lb-url-map", repo=repo_name, provenance=prov)
+                    if default:
+                        self.edge(nm, default, "routes-to", provenance=prov)
+                elif rtype in ("google_compute_backend_service", "google_compute_region_backend_service"):
+                    self.node(nm, kind="lb-backend", repo=repo_name, provenance=prov)
+                elif rtype in ("google_compute_forwarding_rule", "google_compute_global_forwarding_rule"):
+                    tgt = cr(attr(body, "target"))
+                    self.node(nm, kind="lb-forwarding-rule", ip_address=cr(attr(body, "ip_address")),
+                              port_range=attr(body, "port_range"), repo=repo_name, provenance=prov)
+                    if tgt:
+                        self.edge(nm, tgt, "fronted-by", provenance=prov)
+                elif rtype in ("google_api_gateway_gateway", "google_api_gateway_api"):
+                    self.node(nm, kind="api-gateway", repo=repo_name, provenance=prov)
+                # ── TLS / certs ─────────────────────────────────────────────────
+                elif rtype in ("google_compute_ssl_certificate", "google_compute_managed_ssl_certificate",
+                               "google_certificate_manager_certificate"):
+                    self.node(nm, kind="cert", repo=repo_name, provenance=prov)
+                # ── Static IPs / addresses ──────────────────────────────────────
+                elif rtype in ("google_compute_address", "google_compute_global_address"):
+                    self.node(nm, kind="address", region=cr(attr(body, "region")),
+                              repo=repo_name, provenance=prov)
+                # ── Data stores (managed) ───────────────────────────────────────
+                elif rtype == "google_sql_database_instance":
+                    self.node(nm, kind="datastore-sql", store="cloudsql",
+                              database_version=attr(body, "database_version"),
+                              region=cr(attr(body, "region")), repo=repo_name, provenance=prov)
+                elif rtype == "google_redis_instance":
+                    self.node(nm, kind="datastore-redis", store="redis",
+                              region=cr(attr(body, "region")), repo=repo_name, provenance=prov)
+                elif rtype == "google_spanner_instance":
+                    self.node(nm, kind="datastore-spanner", store="spanner",
+                              repo=repo_name, provenance=prov)
+                elif rtype == "google_firestore_database":
+                    # TF field is `location_id`; surfaced as the canonical node attr `location`.
+                    self.node(nm, kind="datastore-firestore", store="firestore",
+                              location=cr(attr(body, "location_id") or attr(body, "location")),
+                              repo=repo_name, provenance=prov)
+                # ── Secrets & config (NAMES ONLY — values never read; cloud-discovery §6) ──
+                elif rtype == "google_secret_manager_secret":
+                    sid = cr(attr(body, "secret_id")) or rname
+                    # Capture only the secret's name/ref. Never any value attribute.
+                    self.node(sid, kind="secret-ref", secret_id=sid, repo=repo_name, provenance=prov)
+                elif rtype == "google_secret_manager_secret_iam_member":
+                    role = attr(body, "role"); member = cr(attr(body, "member"))
+                    sec = cr(attr(body, "secret_id")) or rname
+                    rl = (role or "").lower()
+                    if "accessor" in rl or "viewer" in rl:
+                        self.edge(member or "?", sec, "reads-secret", role=role, provenance=prov)
+                # ── Scheduling / automation / messaging extras ──────────────────
+                elif rtype == "google_workflows_workflow":
+                    self.node(nm, kind="workflow", region=cr(attr(body, "region")),
+                              repo=repo_name, provenance=prov)
+                elif rtype == "google_cloud_tasks_queue":
+                    self.node(nm, kind="task-queue", repo=repo_name, provenance=prov)
+                elif rtype == "google_eventarc_trigger":
+                    dest = cr(attr(body, "service") or attr(body, "destination"))
+                    self.node(nm, kind="eventarc-trigger", repo=repo_name, provenance=prov)
+                    if dest:
+                        self.edge(nm, dest, "triggers", provenance=prov)
 
     def scan_cloudbuild(self, repo_name, repo_path):
         for cb in repo_path.glob("cloudbuild*.yaml"):

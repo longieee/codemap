@@ -22,16 +22,24 @@ def norm_id(name):
 
 
 # ── normalize STATIC (infra.py output) → canonical ────────────────────────────
+# Dimension attrs carried into canonical `node.attrs` (compute + the widened Tier-A dimensions:
+# DNS/networking/LB/certs/IPs/datastores/secret-refs — docs/cloud-discovery.md §2/§5).
+_PASS_ATTRS = ("ingress", "service_account", "image", "vpc_egress", "url", "schedule",
+               "dns_name", "record_type", "rrdatas", "region", "ip_cidr_range", "network",
+               "direction", "ip_address", "port_range", "database_version", "location",
+               "secret_id", "store", "staged_collection", "external")
+
+
 def from_static(infra):
     nodes, edges = [], []
     for n in infra.get("nodes", []):
         nodes.append({"name": n["name"], "kind": n.get("kind", "service"), "provider": "static",
-                      "source": "declared", "attrs": {k: n[k] for k in
-                      ("ingress", "service_account", "image", "vpc_egress", "url", "schedule") if k in n},
+                      "source": "declared", "attrs": {k: n[k] for k in _PASS_ATTRS if k in n},
                       "provenance": n.get("provenance")})
     for e in infra.get("edges", []):
-        edges.append({"from": e["from"], "to": e["to"], "type": e["type"], "source": "declared",
-                      "condition": e.get("condition"), "provenance": e.get("provenance")})
+        ce = dict(e)                 # preserve ALL edge attrs (role/via/value/store/record_type/…)
+        ce["source"] = "declared"    # so the physical cross_service block keeps them (emit.physical_obj)
+        edges.append(ce)
     return nodes, edges
 
 
