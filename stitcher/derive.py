@@ -287,12 +287,26 @@ class Deriver:
                 lines = js.read_text().splitlines()
             except Exception:
                 continue
+            # utility/config/test files are weaker provenance than the shared production client module
+            aux = any(p in ("config", "scripts", "script", "bin", "__tests__", "test", "tests", "examples")
+                      for p in js.parts) or js.name.endswith((".spec.js", ".test.js", ".spec.ts", ".test.ts"))
             for i, line in enumerate(lines, 1):
                 if re.search(r"new Redis(\.Cluster)?\(", line):
+                    # The bare constructor is a coarse site; a behavior-config line (below) is more precise.
                     self.add(kind="data-store", src_repo=repo_name, src_symbol=js.stem,
                              src_file=str(js.relative_to(self.workspace)), src_line=i,
                              target_service="Redis", target_endpoint="(tcp; ioredis)",
-                             condition=None, confidence="high", evidence="new Redis()")
+                             condition=None, confidence="high", evidence="new Redis()", prov_rank=3 + aux)
+                if "enableOfflineQueue" in line:
+                    # The load-bearing site for the #19 offline-queue → 504-storm coupling: prefer THIS
+                    # over the `new Redis` ctor as the edge's provenance (§9.4 provenance-precision gap).
+                    # A config-driven site in the shared client module (rank 0) beats a hardcoded copy in
+                    # a config/ utility script (rank 1) — so the representative provenance is redisClients.ts.
+                    self.add(kind="data-store", src_repo=repo_name, src_symbol=js.stem,
+                             src_file=str(js.relative_to(self.workspace)), src_line=i,
+                             target_service="Redis", target_endpoint="(tcp; ioredis)",
+                             condition="REDIS_ENABLE_OFFLINE_QUEUE (offline queue → indefinite queue on VPC blip → 504 storm)",
+                             confidence="high", evidence="ioredis enableOfflineQueue", prov_rank=0 + aux)
 
     def scan_fanout(self, caller_service):
         for name, url in self.registry.fanout:
@@ -332,13 +346,16 @@ def dedup(cands):
                                      "endpoint_family": endpoint_family(c["target_endpoint"]),
                                      "kind": c["kind"], "call_sites": [], "conditions": set(),
                                      "symbols": set(), "confidences": set()})
-        L["call_sites"].append(f'{c["src_file"]}:{c["src_line"]}')
+        # keep (rank, site); a lower prov_rank = a more precise provenance site (behavior-config over ctor)
+        L["call_sites"].append((c.get("prov_rank", 5), f'{c["src_file"]}:{c["src_line"]}'))
         if c.get("condition"):
             L["conditions"].add(c["condition"])
         L["symbols"].add(c["src_symbol"]); L["confidences"].add(c["confidence"])
     out = []
     for i, (_, L) in enumerate(logical.items(), 1):
         L["id"] = f"L{i:03d}"; L["conditions"] = sorted(L["conditions"])
+        # stable rank-sort: only edges with a precise site differ; all others keep insertion order
+        L["call_sites"] = [s for _, s in sorted(L["call_sites"], key=lambda t: t[0])]
         L["symbols"] = sorted(L["symbols"]); L["confidences"] = sorted(L["confidences"])
         L["n_call_sites"] = len(L["call_sites"])
         out.append(L)

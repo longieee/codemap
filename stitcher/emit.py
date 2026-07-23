@@ -32,12 +32,13 @@ def page_for_logical(edge, cfg):
     return pages.get(edge["src_repo"], edge["src_repo"])
 
 
-def logical_obj(edge, grounding):
+def logical_obj(edge, grounding, service_pages=None):
     cond = " AND ".join(edge.get("conditions") or []) or None
     g = grounding.get(edge["id"], {}) if grounding else {}
     if not cond and g.get("guard_hints"):
         cond = " AND ".join(f"{h}==true" for h in g["guard_hints"]) + " (grounded)"
-    obj = {"target": f'[[{edge["target_service"]}]]',
+    tgt = (service_pages or {}).get(edge["target_service"], edge["target_service"])
+    obj = {"target": f'[[{tgt}]]',
            "type": edge["kind"] if edge["kind"] != "http-call" else "http-call",
            "endpoint": edge["endpoint_family"]}
     if cond:
@@ -92,6 +93,7 @@ def main():
 
     cfg = tomllib.loads(Path(a.config).read_text())
     pages = cfg.get("emit", {}).get("pages", {})
+    service_pages = cfg.get("emit", {}).get("service_pages", {})
     grounding = json.loads(Path(a.grounding).read_text()) if a.grounding else {}
 
     patches = {}
@@ -102,7 +104,7 @@ def main():
 
     if a.edges:
         for e in json.loads(Path(a.edges).read_text())["logical_edges"]:
-            add(page_for_logical(e, cfg), logical_obj(e, grounding)); counts["logical"] += 1
+            add(page_for_logical(e, cfg), logical_obj(e, grounding, service_pages)); counts["logical"] += 1
 
     if a.datastore:
         for e in json.loads(Path(a.datastore).read_text())["shared_datastore_edges"]:

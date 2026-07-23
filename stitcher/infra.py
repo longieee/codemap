@@ -27,11 +27,14 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 def strip_comments(text):
-    """Drop full-line HCL comments so commented-out resources aren't parsed as real."""
+    """Blank out full-line HCL comments so commented-out resources aren't parsed as real.
+    Comment lines are replaced with an empty line (not dropped) so byte offsets and LINE NUMBERS
+    stay aligned with the original file — provenance can then cite a real `file:line`."""
     out = []
     for ln in text.splitlines():
         s = ln.lstrip()
         if s.startswith("#") or s.startswith("//"):
+            out.append("")
             continue
         out.append(ln)
     return "\n".join(out)
@@ -86,7 +89,7 @@ def build_resnames(tf_files, vm):
             text = strip_comments(tf.read_text())
         except Exception:
             continue
-        for _rtype, rname, body in iter_hcl_blocks(text):
+        for _rtype, rname, body, _ln in iter_hcl_blocks(text):
             nm = (attr(body, "name") or attr(body, "account_id") or attr(body, "dataset_id")
                   or attr(body, "table_id") or attr(body, "job_id"))
             if not nm or nm.startswith(("local.", "${")):
@@ -101,7 +104,9 @@ def build_resnames(tf_files, vm):
 
 
 def iter_hcl_blocks(text):
-    """Yield (type, name, body) for each `resource "TYPE" "NAME" { ... }` (brace-balanced)."""
+    """Yield (type, name, body, lineno) for each `resource "TYPE" "NAME" { ... }` (brace-balanced).
+    `lineno` is the 1-based line of the `resource` keyword in `text` (kept line-aligned to the
+    original file by strip_comments) so provenance can cite the definition site."""
     for m in re.finditer(r'resource\s+"([a-z0-9_]+)"\s+"([a-z0-9_]+)"\s*\{', text):
         i = m.end() - 1
         depth, j = 0, i
@@ -113,7 +118,8 @@ def iter_hcl_blocks(text):
                 if depth == 0:
                     break
             j += 1
-        yield m.group(1), m.group(2), text[i + 1:j]
+        lineno = text.count("\n", 0, m.start()) + 1
+        yield m.group(1), m.group(2), text[i + 1:j], lineno
 
 
 def attr(body, key):
@@ -167,8 +173,9 @@ class InfraExtractor:
                 text = strip_comments(tf.read_text())   # drop commented-out resources
             except Exception:
                 continue
-            prov = str(tf.relative_to(self.ws))
-            for rtype, rname, body in iter_hcl_blocks(text):
+            relpath = str(tf.relative_to(self.ws))
+            for rtype, rname, body, lineno in iter_hcl_blocks(text):
+                prov = f"{relpath}:{lineno}"   # provenance cites the resource's definition site
                 nm = cr(attr(body, "name")) or rname
                 sa = cr(attr(body, "service_account") or attr(body, "service_account_email"))
                 if rtype in ("google_cloud_run_v2_service", "google_cloud_run_service",

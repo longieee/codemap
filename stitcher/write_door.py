@@ -58,8 +58,11 @@ def merge_block(existing_fm, new_edges):
     """Return (new_frontmatter_text, added_count). Union new_edges into any existing cross_service: block,
     replacing that block textually and leaving every other key untouched."""
     prior = []
-    # find an existing cross_service: block (from the key to the next top-level key or EOF)
-    m = re.search(r"^cross_service:\s*\n(.*?)(?=^\S|\Z)", existing_fm + "\n", re.S | re.M)
+    # find an existing cross_service: block (from the key to the next TOP-LEVEL key or EOF).
+    # The block body is YAML list items (`- ...`) + their indented children, so the terminator is
+    # the next line starting with a non-space, non-`-` char — NOT just `^\S` (which `- target:` hits,
+    # truncating the capture to empty and breaking idempotency by re-adding every edge).
+    m = re.search(r"^cross_service:[ \t]*\n(.*?)(?=^[^\s-]|\Z)", existing_fm + "\n", re.S | re.M)
     body_wo = existing_fm
     if m:
         try:
@@ -85,17 +88,26 @@ def main():
     ap.add_argument("--dirs", default="services,components,data-stores,infrastructure,apis",
                     help="vault content subdirs to search for target pages")
     ap.add_argument("--only", default=None, help="comma-sep page titles to limit the write to")
+    ap.add_argument("--exclude-type", default=None,
+                    help="comma-sep edge types to skip (e.g. mcp-fanout — curated as service inventory, not per-edge)")
     a = ap.parse_args()
 
     cfg = tomllib.loads(Path(a.config).read_text())
     vault = Path(cfg["codemap"]["vault_dir"])
     patches = json.loads(Path(a.patches).read_text())
     only = set(s.strip() for s in a.only.split(",")) if a.only else None
+    excl = set(s.strip() for s in a.exclude_type.split(",")) if a.exclude_type else set()
     idx = title_index(vault, [s.strip() for s in a.dirs.split(",")])
 
-    applied, missing, total_added = [], [], 0
+    applied, missing, total_added, skipped = [], [], 0, 0
     for title, edges in sorted(patches.items()):
         if only and title not in only:
+            continue
+        if excl:
+            kept = [e for e in edges if e.get("type") not in excl]
+            skipped += len(edges) - len(kept)
+            edges = kept
+        if not edges:
             continue
         f = idx.get(title)
         if not f:
@@ -124,7 +136,7 @@ def main():
         for title, n in missing[:20]:
             print(f"      - {title} ({n} edges)", file=sys.stderr)
     print(f"[{mode}] {total_added} cross_service edges merged into {len(applied)} pages; "
-          f"{len(missing)} unresolved.", file=sys.stderr)
+          f"{len(missing)} unresolved; {skipped} skipped (--exclude-type).", file=sys.stderr)
 
 
 if __name__ == "__main__":
