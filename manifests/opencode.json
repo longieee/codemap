@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "codemap": {
+      "type": "local",
+      "command": ["<CODEMAP_ROOT>/bin/fmg", "-w", "<VAULT>", "serve"],
+      "enabled": true
+    }
+  }
+}

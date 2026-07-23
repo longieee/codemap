@@ -1,0 +1,56 @@
+{
+  "description": "Navigation-eval questions for codemap. Each is answered by a served-map query (coarse query/bridge or typed xedges) — never by reading source — and must resolve within max_hops (<= 3), the packaged form of the ARCHITECTURE §6.4 / Appendix-A '<= 3 graph hops' product bar.",
+  "vault": "fixture-vault",
+  "questions": [
+    {
+      "id": "Q1",
+      "topic": "http-call: what endpoint does the Context Service call on the Frontend, and under what condition?",
+      "cmd": "xedges",
+      "node": "Context Service",
+      "expect": ["Frontend", "http-call", "/api/agents/chat", "resumable_flow_flag"],
+      "max_hops": 3
+    },
+    {
+      "id": "Q2",
+      "topic": "data-store: how does the Frontend use Redis, and what is the risk condition?",
+      "cmd": "xedges",
+      "node": "Frontend",
+      "expect": ["Redis", "data-store", "REDIS_ENABLE_OFFLINE_QUEUE"],
+      "max_hops": 3
+    },
+    {
+      "id": "Q3",
+      "topic": "shares-datastore: which job is coupled to the Frontend's conversation store with no direct call?",
+      "cmd": "xedges",
+      "node": "Cleanup Job",
+      "expect": ["Frontend", "shares-datastore", "conversations"],
+      "max_hops": 3
+    },
+    {
+      "id": "Q4",
+      "topic": "shares-datastore: how is the Scheduler coupled to the Frontend (RBAC collections)?",
+      "cmd": "xedges",
+      "node": "Scheduler",
+      "expect": ["Frontend", "shares-datastore", "roles"],
+      "max_hops": 3
+    },
+    {
+      "id": "Q5",
+      "topic": "coarse bridge: shortest path from the Context Service to Redis",
+      "cmd": "bridge",
+      "from": "Context Service",
+      "to": "Redis",
+      "expect": ["Frontend"],
+      "max_hops": 3
+    },
+    {
+      "id": "Q6",
+      "topic": "coarse query: which datastores does the Frontend depend on?",
+      "cmd": "query",
+      "node": "Frontend",
+      "direction": "up",
+      "expect": ["MongoDB", "Redis"],
+      "max_hops": 3
+    }
+  ]
+}

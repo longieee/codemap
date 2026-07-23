@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codemap": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/fmg",
+      "args": ["-w", "${CLAUDE_PROJECT_DIR}", "serve"]
+    }
+  }
+}

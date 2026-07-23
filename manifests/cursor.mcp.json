@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codemap": {
+      "command": "<CODEMAP_ROOT>/bin/fmg",
+      "args": ["-w", "<VAULT>", "serve"]
+    }
+  }
+}

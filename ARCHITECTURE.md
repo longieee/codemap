@@ -114,22 +114,30 @@ cross-service edges are served by a dedicated `xedges` / `cross_service` tool (�
 The deliverable is **one directory** that drops into any project:
 
 ```
-codemap/  ├─ install.sh   (installs ALL deps; --check preflight; version lock)
-          ├─ stitcher/    (derive.py · ground.py · infra.py · datastore.py · reconcile.py · emit.py)  ← owned core
-          │               (logical + physical + shared-datastore families)
-          ├─ init/        (cold-start orchestration — inventory.py = page-inventory backbone)  ← M3
-          ├─ skills/      (cold-start orchestration prose · maintainer write-door · tools docs)
-          ├─ config/      (codemap.toml · .fmg.toml.tmpl)
-          ├─ bin/         (vendored graph-store binary; cargo fallback)
-          ├─ tests/       (acceptance tests — contract-derived, test-author-authored)
-          ├─ evals/       (navigation eval harness)
-          └─ docs/        (ARCHITECTURE.md · cold-start-contract.md · cloud-discovery.md)
+codemap/  ├─ install.sh       (installs ALL deps; --check preflight; .install-lock)        ← M4
+          ├─ .claude-plugin/  (plugin.json — Claude Code plugin manifest)                  ← M4
+          ├─ .mcp.json        (MCP server registration: fmg -w <vault> serve)              ← M4
+          ├─ manifests/       (opencode · Cursor shims for the same server)                ← M4
+          ├─ bin/             (fmg-<os>-<arch> vendored static binary; cargo fallback)     ← M4
+          ├─ stitcher/        (derive · ground · infra · datastore · reconcile · emit)     ← owned core, M1/M2
+          │                   (logical + physical + shared-datastore families)
+          ├─ init/            (inventory.py = cold-start page-inventory backbone)          ← M3
+          ├─ discovery/       (gcp/cr-topology.sh — read-only live cloud discovery)        ← M5 (Tier B)
+          ├─ skills/          (wiki-init · wiki-maintainer · wiki-tools — bundled copies)  ← M4
+          ├─ config/          (codemap.toml.example · .fmg.toml.tmpl)
+          ├─ tests/           (acceptance tests — contract-derived, test-author-authored)
+          ├─ eval-harness/    (navigation eval: runner · questions · self-contained fixture vault)  ← M4
+          └─ docs/            (ARCHITECTURE · packaging-contract · cold-start-contract · cloud-discovery)
 ```
 
-`install.sh` installs, pins, and verifies every dependency: the **graph store** (vendored binary or
-built from source), the **LSP oracle** and its language servers, a **Python venv** for the stitcher,
-**MCP registration** into the host agent tool, and the vault's graph config. `install.sh --check`
-pings each — including an MCP `initialize` — and writes a version lock. One command, drop-in.
+`install.sh` installs, pins, and verifies every dependency: the **graph store** (a vendored static
+per-platform binary — `fmg-<os>-<arch>`, statically linked so it runs on any Linux regardless of
+libc — or built from source via `cargo`), the **LSP oracle** (pinned Serena) and its language
+servers, a **Python venv** for the stitcher, **MCP registration** into the host agent tool (Claude
+Code plugin manifest + opencode/Cursor shims), and the vault's graph config. `install.sh --check`
+verifies each — mutating nothing and touching no network — and a full run writes a version lock
+(`.install-lock`). The Claude Code plugin (`.claude-plugin/plugin.json` + `.mcp.json`) makes the
+package a drop-in: `claude --plugin-dir codemap/` auto-registers the served map. One command, drop-in.
 
 ---
 
@@ -287,7 +295,7 @@ HTTP-FP gate is honestly deferred to the first external drop-in that has a call 
 | **M1** | Stitcher (owned core), productionized + config-driven; **re-gate on a fresh repo pair.** *(DONE 2026-07-22 — logical + physical + shared-datastore families built; fresh-pair data-store+infra re-gate 0% FP, owner-aware; wired through emit; independently graded PASS.)* |
 | M2 | Curate + serve: write edges via the maintainer write door; coverage + provenance gates. *(DONE 2026-07-23 — 26 typed runtime edges served via `fmg xedges`, §9.3 byte-identical, Q2 26/26 provenance-precise, Q5 coarse-coverage complete; write-door idempotency fixed; independently graded PASS.)* |
 | M3 | Cold-start orchestration (D7): survey → inventory → bounded per-page workers → verify loop. *(DONE 2026-07-23 — `init/inventory.py` page-inventory backbone: surveys the workspace and enumerates every page up front so coverage is decided explicitly (beats Lost-in-the-Middle); budget-aware defer-not-drop + log; 9 acceptance tests authored by the `test-author` agent from `docs/cold-start-contract.md`; llm-wiki-init SKILL reworked; evaluator PASS all dims=2.)* |
-| M4 | Package + install script: single deliverable; clean-machine drop-in test. |
+| **M4** | Package + install script: single deliverable; clean-machine drop-in test. *(DONE 2026-07-23 — Claude Code plugin manifest + opencode/Cursor shims, a portable **statically-linked** vendored `fmg` (musl), 3 bundled skills, `eval-harness/` (6 nav questions ≤ 3 hops + a self-contained fixture vault), and a single `install.sh` that installs + pins + verifies all 7 deps with a no-mutation `--check`. Contract-derived acceptance tests (`tests/test_packaging.py`, 21/21, `@test-author`-authored). Clean-machine drop-in proven green in a foreign-distro container (Debian trixie, glibc 2.41); independently graded PASS.)* |
 
 Product success target: the served map resolves ≥ 15 of ~20 real load-bearing connections in ≤ 3 graph
 hops each, within a defined staleness budget.
