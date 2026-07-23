@@ -117,10 +117,13 @@ The deliverable is **one directory** that drops into any project:
 codemap/  ├─ install.sh   (installs ALL deps; --check preflight; version lock)
           ├─ stitcher/    (derive.py · ground.py · infra.py · datastore.py · reconcile.py · emit.py)  ← owned core
           │               (logical + physical + shared-datastore families)
-          ├─ skills/      (cold-start orchestration · maintainer write-door · tools docs)
+          ├─ init/        (cold-start orchestration — inventory.py = page-inventory backbone)  ← M3
+          ├─ skills/      (cold-start orchestration prose · maintainer write-door · tools docs)
           ├─ config/      (codemap.toml · .fmg.toml.tmpl)
           ├─ bin/         (vendored graph-store binary; cargo fallback)
-          └─ evals/       (navigation eval harness)
+          ├─ tests/       (acceptance tests — contract-derived, test-author-authored)
+          ├─ evals/       (navigation eval harness)
+          └─ docs/        (ARCHITECTURE.md · cold-start-contract.md · cloud-discovery.md)
 ```
 
 `install.sh` installs, pins, and verifies every dependency: the **graph store** (vendored binary or
@@ -282,8 +285,8 @@ HTTP-FP gate is honestly deferred to the first external drop-in that has a call 
 | Milestone | Scope |
 |---|---|
 | **M1** | Stitcher (owned core), productionized + config-driven; **re-gate on a fresh repo pair.** *(DONE 2026-07-22 — logical + physical + shared-datastore families built; fresh-pair data-store+infra re-gate 0% FP, owner-aware; wired through emit; independently graded PASS.)* |
-| M2 | Curate + serve: write edges via the maintainer write door; coverage + provenance gates. |
-| M3 | Cold-start orchestration (D7): survey → inventory → bounded per-page workers → verify loop. |
+| M2 | Curate + serve: write edges via the maintainer write door; coverage + provenance gates. *(DONE 2026-07-23 — 26 typed runtime edges served via `fmg xedges`, §9.3 byte-identical, Q2 26/26 provenance-precise, Q5 coarse-coverage complete; write-door idempotency fixed; independently graded PASS.)* |
+| M3 | Cold-start orchestration (D7): survey → inventory → bounded per-page workers → verify loop. *(DONE 2026-07-23 — `init/inventory.py` page-inventory backbone: surveys the workspace and enumerates every page up front so coverage is decided explicitly (beats Lost-in-the-Middle); budget-aware defer-not-drop + log; 9 acceptance tests authored by the `test-author` agent from `docs/cold-start-contract.md`; llm-wiki-init SKILL reworked; evaluator PASS all dims=2.)* |
 | M4 | Package + install script: single deliverable; clean-machine drop-in test. |
 
 Product success target: the served map resolves ≥ 15 of ~20 real load-bearing connections in ≤ 3 graph
