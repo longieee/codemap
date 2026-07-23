@@ -152,9 +152,22 @@ touch the stitcher core, the store, or the map schema — only `discovery/`, `pr
 
 ## 8. Status & next steps
 
-- **Done:** Tier A for GCP/Terraform (`infra.py`) — compute, invoke (IAM), pubsub, deploy-env, runs-as,
-  service inventory (incl. no-source nodes).
-- **Next (implementation):** (1) `discovery/gcp/cr-topology.sh` — the missing Tier-B GCP discovery per §4
-  (esp. DNS/networking/LB/domains); (2) `stitcher/reconcile.py` — Tier C; (3) widen Tier A to the §2
-  dimensions; (4) AWS + Azure providers per §7; (5) wire physical nodes/edges through `emit.py`.
+- **Done (GCP):**
+  - **Tier A** (`infra.py`) — the **full §2 taxonomy**: compute, invoke (IAM), pubsub, deploy-env,
+    runs-as, service inventory (incl. no-source nodes), **DNS/domains, networking (VPC/subnet/
+    connector/firewall/NAT), load-balancing (url-map/backend/forwarding/api-gateway), certs, static
+    IPs, managed datastores (SQL/Redis/Spanner/Firestore + GCS/BigQuery), secret-refs (names only),
+    workflows/task-queues/eventarc**. Contract-tested (`tests/test_tier_a_widen.py`, 9/9).
+  - **Tier B** (`discovery/gcp/cr-topology.sh`) — read-only `gcloud … --format=json` discovery across
+    all §4 dimensions; fails closed without auth; secret VALUES never read. Built; **not yet live-run**
+    (needs an operator with cloud auth).
+  - **Tier C** (`stitcher/reconcile.py`) — declared⋈live join → declared/live/both + drift +
+    deployed-not-in-IaC. `from_static` normalizes the full Tier-A taxonomy; `emit.py` wires the
+    reconciled nodes/edges into `cross_service:` patches + the service inventory.
+- **Remaining to close codemap-m5 (needs an authed operator shell):** (1) first read-only
+  `cr-topology.sh` **live-run**; (2) widen `reconcile.from_live` to **mirror the new dimensions**
+  (normalize the live topology JSON for DNS/network/LB/cert/address/spanner/firestore/workflow/… so
+  the declared⋈live join tags them — `from_static` is done, `from_live` currently covers only a
+  subset); (3) the declared⋈live reconcile on real data.
+- **Later (codemap-m6):** AWS + Azure providers per §7.
 - Track as build items under `codemap` (see `helperai-llm-wiki/feature_list.json`).
