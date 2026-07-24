@@ -82,26 +82,48 @@ SECRET_REFS="$(G secrets list)"
 SCHEDULER="$(G scheduler jobs list)"
 WORKFLOWS="$(G workflows list)"
 
-python3 - "$PROJECT" <<PY
-import json, sys
-def L(s):
-    try: return json.loads(s)
+# Assemble via TEMP FILES, not heredoc interpolation. Embedding captured JSON into a Python string
+# literal (`L('''$VAR''')`) is unsafe: bash interpolates it into a NON-raw string, so backslash
+# sequences in the data (e.g. in a service annotation) get interpreted by Python and corrupt the
+# JSON → json.loads fails → the whole dimension is silently dropped. Writing each var to a file and
+# json.load-ing it (with a QUOTED heredoc, no interpolation) preserves the bytes exactly.
+TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
+w(){ printf '%s' "$2" > "$TMPD/$1.json"; }
+w compute_services "$COMPUTE_SERVICES";   w compute_jobs "$COMPUTE_JOBS"
+w functions "$FUNCTIONS";                 w instances "$INSTANCES"
+w invoke "$INVOKE";                       w service_accounts "$SERVICE_ACCOUNTS"
+w vpcs "$VPCS";                           w subnets "$SUBNETS";        w connectors "$CONNECTORS"
+w firewalls "$FIREWALLS";                 w routers "$ROUTERS";        w nat_addrs "$NAT_ADDRS"
+w dns_zones "$DNS_ZONES";                 w domain_mappings "$DOMAIN_MAPPINGS"
+w url_maps "$URL_MAPS";                   w backend_services "$BACKEND_SERVICES"
+w forwarding_rules "$FORWARDING_RULES";   w api_gateways "$API_GATEWAYS"
+w ssl_certs "$SSL_CERTS"
+w topics "$TOPICS";                       w subscriptions "$SUBSCRIPTIONS";  w eventarc "$EVENTARC"
+w sql "$SQL";                             w redis "$REDIS";            w buckets "$BUCKETS"
+w secret_refs "$SECRET_REFS"
+w scheduler "$SCHEDULER";                 w workflows "$WORKFLOWS"
+
+python3 - "$PROJECT" "$TMPD" <<'PY'
+import json, sys, os
+PROJECT, D = sys.argv[1], sys.argv[2]
+def L(name):
+    try: return json.load(open(os.path.join(D, name + ".json")))
     except Exception: return []
 doc = {
-  "provider": "gcp", "project": sys.argv[1], "captured": "TIER_B_LIVE",
-  "compute": {"services": L('''$COMPUTE_SERVICES'''), "jobs": L('''$COMPUTE_JOBS'''),
-              "functions": L('''$FUNCTIONS'''), "instances": L('''$INSTANCES''')},
-  "identity_invoke": {"invoke_policies": L('''$INVOKE'''), "service_accounts": L('''$SERVICE_ACCOUNTS''')},
-  "networking": {"vpcs": L('''$VPCS'''), "subnets": L('''$SUBNETS'''), "connectors": L('''$CONNECTORS'''),
-                 "firewalls": L('''$FIREWALLS'''), "routers": L('''$ROUTERS'''), "addresses": L('''$NAT_ADDRS''')},
-  "dns_domains": {"zones": L('''$DNS_ZONES'''), "domain_mappings": L('''$DOMAIN_MAPPINGS''')},
-  "load_balancing": {"url_maps": L('''$URL_MAPS'''), "backend_services": L('''$BACKEND_SERVICES'''),
-                     "forwarding_rules": L('''$FORWARDING_RULES'''), "api_gateways": L('''$API_GATEWAYS''')},
-  "certs": {"ssl_certificates": L('''$SSL_CERTS''')},
-  "messaging": {"topics": L('''$TOPICS'''), "subscriptions": L('''$SUBSCRIPTIONS'''), "eventarc": L('''$EVENTARC''')},
-  "datastores": {"sql": L('''$SQL'''), "redis": L('''$REDIS'''), "buckets": L('''$BUCKETS''')},
-  "secrets_refs": L('''$SECRET_REFS'''),   # names only
-  "scheduling": {"scheduler": L('''$SCHEDULER'''), "workflows": L('''$WORKFLOWS''')},
+  "provider": "gcp", "project": PROJECT, "captured": "TIER_B_LIVE",
+  "compute": {"services": L("compute_services"), "jobs": L("compute_jobs"),
+              "functions": L("functions"), "instances": L("instances")},
+  "identity_invoke": {"invoke_policies": L("invoke"), "service_accounts": L("service_accounts")},
+  "networking": {"vpcs": L("vpcs"), "subnets": L("subnets"), "connectors": L("connectors"),
+                 "firewalls": L("firewalls"), "routers": L("routers"), "addresses": L("nat_addrs")},
+  "dns_domains": {"zones": L("dns_zones"), "domain_mappings": L("domain_mappings")},
+  "load_balancing": {"url_maps": L("url_maps"), "backend_services": L("backend_services"),
+                     "forwarding_rules": L("forwarding_rules"), "api_gateways": L("api_gateways")},
+  "certs": {"ssl_certificates": L("ssl_certs")},
+  "messaging": {"topics": L("topics"), "subscriptions": L("subscriptions"), "eventarc": L("eventarc")},
+  "datastores": {"sql": L("sql"), "redis": L("redis"), "buckets": L("buckets")},
+  "secrets_refs": L("secret_refs"),   # names only
+  "scheduling": {"scheduler": L("scheduler"), "workflows": L("workflows")},
 }
 print(json.dumps(doc, indent=2))
 PY
