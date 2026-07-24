@@ -92,7 +92,12 @@ have env-suffixed names on each side; the diff reports the A-side spelling for t
    `identical_count`, not in `differs`. An attr present on **exactly one** side (set in one env,
    absent in the other) **counts as a delta** — reported with the absent side as `null` (a config
    set in prod but unset in test is a real difference worth surfacing). *(Clarified 2026-07-24 per
-   @test-author.)*
+   @test-author.)* A **GCP self-link** attr value (a string containing `googleapis.com` and
+   `/projects/`) is normalized to its final path segment before comparison + reporting, so a
+   project-qualified URL for the **same logical resource** (`…/projects/<projA>/…/default` vs
+   `…/projects/<projB>/…/default`) is NOT a false delta; a real difference in the final segment
+   (`…/regions/us-west4` vs `…/regions/asia-southeast3`) still surfaces. *(Added 2026-07-24 after the
+   first real test-vs-prod run flooded `differs` with project-URL noise.)*
 5. **Edge diff.** Edges are matched across environments by `(type, norm_id(from), norm_id(to))`; an
    edge present in exactly one env appears in that side's `edges.only_in_*`.
 6. **Deterministic + stable ordering.** Two runs on the same inputs produce equal output; lists are

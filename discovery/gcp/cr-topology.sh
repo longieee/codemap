@@ -19,7 +19,9 @@ command -v gcloud >/dev/null || { echo '{"error":"gcloud not installed"}'; exit 
 [ -n "$PROJECT" ] || PROJECT="$(gcloud config get-value project 2>/dev/null)"
 gcloud auth print-access-token >/dev/null 2>&1 || { echo '{"error":"not authenticated (run: gcloud auth login)"}'; exit 1; }
 
-G(){ gcloud "$@" --project "$PROJECT" --format=json 2>/dev/null || echo '[]'; }
+# Every call is bounded (CR_CALL_TIMEOUT, default 60s) so one slow/hanging API can't stall the
+# whole sweep — a timed-out dimension degrades to [] rather than blocking discovery.
+G(){ timeout "${CR_CALL_TIMEOUT:-60}" gcloud "$@" --project "$PROJECT" --format=json 2>/dev/null || echo '[]'; }
 
 # Each dimension → a read-only list/describe. `|| echo []` keeps a missing API from aborting the sweep.
 COMPUTE_SERVICES="$(G run services list)"
@@ -27,18 +29,25 @@ COMPUTE_JOBS="$(G run jobs list)"
 FUNCTIONS="$(G functions list)"
 INSTANCES="$(G compute instances list)"
 
-# invoke / IAM — per Cloud Run service (who may invoke it). Iterate service names.
+# invoke / IAM — per Cloud Run service (who may invoke it). get-iam-policy is REGION-SCOPED, so it
+# only works when a region is known; without --regions it would error once per service (100s of
+# wasted calls on a large project). Guard on a region + bound each call.
 INVOKE='[]'
-for svc in $(echo "$COMPUTE_SERVICES" | python3 -c 'import sys,json;[print(s["metadata"]["name"]) for s in json.load(sys.stdin)]' 2>/dev/null); do
-  pol="$(gcloud run services get-iam-policy "$svc" --project "$PROJECT" --region "${REGIONS%%,*}" --format=json 2>/dev/null || echo '{}')"
-  INVOKE="$(python3 -c 'import sys,json;a=json.loads(sys.argv[1]);a.append({"service":sys.argv[2],"policy":json.loads(sys.argv[3])});print(json.dumps(a))' "$INVOKE" "$svc" "$pol")"
-done
+REGION1="${REGIONS%%,*}"
+if [ -n "$REGION1" ]; then
+  for svc in $(echo "$COMPUTE_SERVICES" | python3 -c 'import sys,json;[print(s["metadata"]["name"]) for s in json.load(sys.stdin)]' 2>/dev/null); do
+    pol="$(timeout 20 gcloud run services get-iam-policy "$svc" --project "$PROJECT" --region "$REGION1" --format=json 2>/dev/null || echo '{}')"
+    INVOKE="$(python3 -c 'import sys,json;a=json.loads(sys.argv[1]);a.append({"service":sys.argv[2],"policy":json.loads(sys.argv[3])});print(json.dumps(a))' "$INVOKE" "$svc" "$pol")"
+  done
+else
+  echo "cr-topology: invoke policies skipped (get-iam-policy is region-scoped; pass --regions to include them)" >&2
+fi
 SERVICE_ACCOUNTS="$(G iam service-accounts list)"
 
 # networking
 VPCS="$(G compute networks list)"
 SUBNETS="$(G compute networks subnets list)"
-CONNECTORS="$(gcloud compute networks vpc-access connectors list --project "$PROJECT" --region "${REGIONS%%,*}" --format=json 2>/dev/null || echo '[]')"
+CONNECTORS="$(timeout "${CR_CALL_TIMEOUT:-60}" gcloud compute networks vpc-access connectors list --project "$PROJECT" --region "${REGIONS%%,*}" --format=json 2>/dev/null || echo '[]')"
 FIREWALLS="$(G compute firewall-rules list)"
 ROUTERS="$(G compute routers list)"
 NAT_ADDRS="$(G compute addresses list)"
@@ -63,7 +72,7 @@ EVENTARC="$(G eventarc triggers list)"
 
 # data stores
 SQL="$(G sql instances list)"
-REDIS="$(gcloud redis instances list --project "$PROJECT" --region "${REGIONS%%,*}" --format=json 2>/dev/null || echo '[]')"
+REDIS="$(timeout "${CR_CALL_TIMEOUT:-60}" gcloud redis instances list --project "$PROJECT" --region "${REGIONS%%,*}" --format=json 2>/dev/null || echo '[]')"
 BUCKETS="$(G storage buckets list)"
 
 # secrets — NAMES ONLY, never versions access

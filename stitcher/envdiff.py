@@ -47,12 +47,22 @@ def edge_key(e):
     return (e.get("type"), reconcile.norm_id(e.get("from")), reconcile.norm_id(e.get("to")))
 
 
+def _norm_val(v):
+    """Normalize a GCP self-link value to its final path segment, so a project-qualified URL for the
+    SAME logical resource (`.../projects/<projA>/.../default` vs `.../projects/<projB>/.../default`)
+    is not a false cross-env delta. Non-URL values pass through unchanged."""
+    if isinstance(v, str) and "googleapis.com" in v and "/projects/" in v:
+        return v.rstrip("/").split("/")[-1]
+    return v
+
+
 def _attr_deltas(na, nb, ignore):
-    """Per-attr differences between two matched nodes' `attrs` (union of keys, minus ignore)."""
+    """Per-attr differences between two matched nodes' `attrs` (union of keys, minus ignore).
+    Values are self-link-normalized before comparison + reporting (see _norm_val)."""
     aa, ab = na.get("attrs", {}) or {}, nb.get("attrs", {}) or {}
     out = {}
     for k in (set(aa) | set(ab)) - set(ignore):
-        va, vb = aa.get(k), ab.get(k)
+        va, vb = _norm_val(aa.get(k)), _norm_val(ab.get(k))
         if va != vb:
             out[k] = {"a": va, "b": vb}
     return out
