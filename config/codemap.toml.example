@@ -27,3 +27,23 @@ ground    = true                        # use Serena to ground candidate edges (
 # Optional: files/globs that declare downstream services (e.g. an MCP/service registry yaml).
 [registry]
 # service_config = ["config/services.yaml"]   # entries with url: become fan-out targets
+
+# Cloud discovery (physical layer). Each ENVIRONMENT is its own cloud project → its own
+# self-contained map. Produce one live snapshot per env, reconcile it against the static IaC,
+# then compare two envs with stitcher/envdiff.py.
+[cloud]
+provider = "gcp"                 # gcp | aws | azure
+
+[cloud.environments.test]
+project = "my-project-test"      # the env's cloud project / account / subscription
+regions = ["us-central1"]
+
+[cloud.environments.prod]
+project = "my-project-prod"
+regions = ["us-central1"]
+
+# Per-environment flow (nothing here needs cloud auth except the snapshot step):
+#   1. snapshot  : discovery/gcp/cr-topology.sh --project <env.project> [--regions ...] > topo.<env>.json
+#   2. static    : python3 stitcher/infra.py --config config/codemap.toml --out infra.json
+#   3. per-env   : python3 stitcher/reconcile.py --static infra.json --live topo.<env>.json --out reconciled.<env>.json
+#   4. compare   : python3 stitcher/envdiff.py --a reconciled.test.json --b reconciled.prod.json --a-name test --b-name prod
