@@ -162,12 +162,16 @@ touch the stitcher core, the store, or the map schema — only `discovery/`, `pr
     all §4 dimensions; fails closed without auth; secret VALUES never read. Built; **not yet live-run**
     (needs an operator with cloud auth).
   - **Tier C** (`stitcher/reconcile.py`) — declared⋈live join → declared/live/both + drift +
-    deployed-not-in-IaC. `from_static` normalizes the full Tier-A taxonomy; `emit.py` wires the
-    reconciled nodes/edges into `cross_service:` patches + the service inventory.
-- **Remaining to close codemap-m5 (needs an authed operator shell):** (1) first read-only
-  `cr-topology.sh` **live-run**; (2) widen `reconcile.from_live` to **mirror the new dimensions**
-  (normalize the live topology JSON for DNS/network/LB/cert/address/spanner/firestore/workflow/… so
-  the declared⋈live join tags them — `from_static` is done, `from_live` currently covers only a
-  subset); (3) the declared⋈live reconcile on real data.
+    deployed-not-in-IaC. **Both** `from_static` **and** `from_live` normalize the full Tier-A
+    taxonomy (symmetric); DNS zones join on their zone name. Validated on a synthetic Tier-B snapshot
+    (cr-topology.sh's exact JSON shape): the join tags declared/live/both, surfaces
+    deployed-not-in-IaC ("missing services"), declared-not-live, and attribute drift across all the
+    widened dimensions. `emit.py` wires the reconciled nodes/edges into `cross_service:` patches +
+    the service inventory.
+- **Remaining to close codemap-m5 (needs an authed operator shell):** the **first real
+  read-only `cr-topology.sh` live-run** (`gcloud auth`) → feed its snapshot to `reconcile.py --live`
+  → surface the real deployed-not-in-IaC services + drift on the actual deployment. All the code
+  (Tier A widen, Tier B script, Tier C join incl. `from_live`, emit-wire) is built and validated
+  headless; only the live snapshot needs cloud auth.
 - **Later (codemap-m6):** AWS + Azure providers per §7.
 - Track as build items under `codemap` (see `helperai-llm-wiki/feature_list.json`).
