@@ -55,8 +55,24 @@ def _name(d, *path, default=None):
 
 
 def from_live(topo):
+    """Normalize a cr-topology.sh (Tier-B) snapshot → canonical nodes/edges. Mirrors the full
+    Tier-A taxonomy (from_static) so the declared⋈live join in reconcile() can tag every dimension.
+    Node identity is the resource's gcloud name (norm_id'd in the join key), chosen to match the
+    static side (e.g. a DNS zone joins on its zone `name`, not its `dnsName`)."""
     nodes, edges = [], []
     prov = "live:gcloud"
+
+    def N(name, kind, **attrs):
+        if name:
+            nodes.append({"name": norm_id(name), "kind": kind, "provider": "gcp", "source": "live",
+                          "attrs": {k: v for k, v in attrs.items() if v is not None}, "provenance": prov})
+
+    def E(frm, to, etype, **attrs):
+        if frm and to and isinstance(to, str):
+            e = {"from": norm_id(frm), "to": norm_id(to), "type": etype, "source": "live", "provenance": prov}
+            e.update({k: v for k, v in attrs.items() if v is not None})
+            edges.append(e)
+
     comp = topo.get("compute", {})
     for s in comp.get("services", []):
         nm = _name(s, "metadata", "name") or _name(s, "name")
@@ -66,10 +82,8 @@ def from_live(topo):
                                     "ingress": _name(s, "metadata", "annotations", "run.googleapis.com/ingress")},
                           "provenance": prov})
     for j in comp.get("jobs", []):
-        nm = _name(j, "metadata", "name") or _name(j, "name")
-        if nm:
-            nodes.append({"name": nm, "kind": "cloud-run-job", "provider": "gcp", "source": "live", "attrs": {}, "provenance": prov})
-    # invoke edges from IAM policies
+        N(_name(j, "metadata", "name") or _name(j, "name"), "cloud-run-job")
+    # identity — invoke edges from IAM policies + service accounts
     for ip in _name(topo, "identity_invoke", "invoke_policies", default=[]):
         svc = ip.get("service")
         for b in _name(ip, "policy", "bindings", default=[]):
@@ -77,28 +91,76 @@ def from_live(topo):
                 for m in b.get("members", []):
                     edges.append({"from": m, "to": svc, "type": "invokes", "source": "live",
                                   "condition": b.get("role"), "provenance": prov})
-    # messaging
-    for sub in _name(topo, "messaging", "subscriptions", default=[]):
-        nm = _name(sub, "name"); topic = _name(sub, "topic")
-        if nm and topic:
-            edges.append({"from": norm_id(nm), "to": norm_id(topic), "type": "subscribes-to", "source": "live", "provenance": prov})
-    # dns / lb / datastores → nodes (extensible; add edge inference as needed)
+    for sa in _name(topo, "identity_invoke", "service_accounts", default=[]):
+        N(_name(sa, "email") or _name(sa, "name"), "service-account")
+    # networking
+    net = topo.get("networking", {})
+    for v in net.get("vpcs", []):
+        N(_name(v, "name"), "network-vpc")
+    for s in net.get("subnets", []):
+        nm, network = _name(s, "name"), _name(s, "network")
+        N(nm, "network-subnet", region=_name(s, "region"), ip_cidr_range=_name(s, "ipCidrRange"), network=network)
+        E(nm, network, "part-of-network")
+    for c in net.get("connectors", []):
+        N(_name(c, "name"), "network-connector", region=_name(c, "region"), network=_name(c, "network"))
+    for f in net.get("firewalls", []):
+        nm, network = _name(f, "name"), _name(f, "network")
+        N(nm, "firewall-rule", direction=_name(f, "direction"), network=network)
+        E(nm, network, "firewall-allows")
+    for r in net.get("routers", []):
+        N(_name(r, "name"), "network-nat", region=_name(r, "region"))
+    for a in net.get("addresses", []):
+        N(_name(a, "name"), "address", region=_name(a, "region"))
+    # dns & domains
     for z in _name(topo, "dns_domains", "zones", default=[]):
-        nm = _name(z, "dnsName") or _name(z, "name")
-        if nm:
-            nodes.append({"name": nm, "kind": "dns-zone", "provider": "gcp", "source": "live", "attrs": {}, "provenance": prov})
+        N(_name(z, "name") or _name(z, "dnsName"), "dns-zone", dns_name=_name(z, "dnsName"))
     for dm in _name(topo, "dns_domains", "domain_mappings", default=[]):
-        host = _name(dm, "metadata", "name"); route = _name(dm, "spec", "routeName")
-        if host and route:
-            edges.append({"from": host, "to": route, "type": "domain-maps-to", "source": "live", "provenance": prov})
-    for kind, items in (("lb-url-map", _name(topo, "load_balancing", "url_maps", default=[])),
-                        ("datastore-sql", _name(topo, "datastores", "sql", default=[])),
-                        ("datastore-redis", _name(topo, "datastores", "redis", default=[])),
-                        ("secret-ref", topo.get("secrets_refs", []))):
-        for it in items:
-            nm = _name(it, "name") or _name(it, "displayName")
-            if nm:
-                nodes.append({"name": norm_id(nm), "kind": kind, "provider": "gcp", "source": "live", "attrs": {}, "provenance": prov})
+        host, route = _name(dm, "metadata", "name"), _name(dm, "spec", "routeName")
+        N(host, "dns-domain")
+        E(host, route, "domain-maps-to")
+    # load balancing & edge
+    lb = topo.get("load_balancing", {})
+    for u in lb.get("url_maps", []):
+        nm, default = _name(u, "name"), _name(u, "defaultService")
+        N(nm, "lb-url-map")
+        E(nm, default, "routes-to")
+    for b in lb.get("backend_services", []):
+        N(_name(b, "name"), "lb-backend")
+    for fr in lb.get("forwarding_rules", []):
+        nm, tgt = _name(fr, "name"), _name(fr, "target")
+        N(nm, "lb-forwarding-rule", ip_address=_name(fr, "IPAddress"), port_range=_name(fr, "portRange"))
+        E(nm, tgt, "fronted-by")
+    for g in lb.get("api_gateways", []):
+        N(_name(g, "name") or _name(g, "displayName"), "api-gateway")
+    # certs
+    for c in _name(topo, "certs", "ssl_certificates", default=[]):
+        N(_name(c, "name"), "cert")
+    # messaging
+    for t in _name(topo, "messaging", "topics", default=[]):
+        N(_name(t, "name"), "pubsub-topic")
+    for sub in _name(topo, "messaging", "subscriptions", default=[]):
+        E(_name(sub, "name"), _name(sub, "topic"), "subscribes-to")
+    for ev in _name(topo, "messaging", "eventarc", default=[]):
+        nm = _name(ev, "name")
+        dest = _name(ev, "destination", "cloudRun", "service") or _name(ev, "destination")
+        N(nm, "eventarc-trigger")
+        E(nm, dest, "triggers")
+    # data stores
+    ds = topo.get("datastores", {})
+    for it in ds.get("sql", []):
+        N(_name(it, "name"), "datastore-sql", database_version=_name(it, "databaseVersion"), region=_name(it, "region"))
+    for it in ds.get("redis", []):
+        N(_name(it, "name"), "datastore-redis", region=_name(it, "region"))
+    for bk in ds.get("buckets", []):
+        N(_name(bk, "name") or _name(bk, "id"), "datastore-bucket", store="gcs")
+    # secrets (names only)
+    for it in topo.get("secrets_refs", []):
+        N(_name(it, "name") or _name(it, "displayName"), "secret-ref")
+    # scheduling
+    for s in _name(topo, "scheduling", "scheduler", default=[]):
+        N(_name(s, "name"), "cloud-scheduler")
+    for w in _name(topo, "scheduling", "workflows", default=[]):
+        N(_name(w, "name"), "workflow", region=_name(w, "region"))
     return nodes, edges
 
 
