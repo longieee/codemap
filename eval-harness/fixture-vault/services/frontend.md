@@ -6,6 +6,13 @@ summary: The chat/UI service; dispatches to downstream services and MCP tools.
 depends_on: ["[[MongoDB]]", "[[Redis]]"]
 related_to: ["[[Backend]]", "[[Context Service]]"]
 cross_service:
+- target: "[[Monitoring MCP Server]]"
+  type: mcp-fanout
+  endpoint: /mcp/tools/call
+  confidence: high
+  grounded: true
+  extracted_from: {repo: "(config)", sha: "6d3a81f0e5c24b97", at: "2026-01-01T00:00:00Z"}
+  provenance: config/service-registry.yaml:12
 - target: "[[Redis]]"
   type: data-store
   endpoint: (tcp; ioredis)

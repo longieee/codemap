@@ -10,19 +10,97 @@ vault_dir = "/path/to/workspace/wiki"
 [repos]
 # logical-name = "relative/path/under/workspace"
 # Each repo is scanned for outbound call sites and config/IaC.
+#
+# SCOPE IS THE FIRST THING THAT LIMITS THE MAP. A repo not listed here is never opened by any
+# extractor, and its absence is silent — the map simply shows less coupling than exists. List
+# every repo of the platform, not just the ones with the interesting application code.
+#
+# Two DIFFERENT gates decide whether a repo contributes anything, and they fail independently:
+#
+#   1. Listing it here is what lets the extractors read it at all.
+#   2. WHICH extractor fires depends on what the repo contains:
+#        * Python / JS / TS source        -> derive.py      (logical: call sites)
+#        * Terraform, cloudbuild          -> infra.py       (physical: invoke/pubsub/deploy-env)
+#        * pymongo / ORM model code       -> datastore.py   (shared-datastore)
+#      A Terraform-only repo (shared infrastructure, IAM, networking) yields NOTHING from the
+#      logical layer no matter how it is configured — it contributes only once the physical
+#      pipeline is actually run. Use stitcher/run-pipeline.sh, which runs all three families and
+#      warns when one produces no edges at all.
+#
+# A repo written in a language with no extractor (Go, Java, Ruby, …) contributes nothing today;
+# listing it is harmless and documents the gap rather than hiding it.
+
+# --- application services (logical + data-store layers) ---
 frontend    = "frontend"
 context-svc = "context-service"
+api         = "backend-api"
+
+# --- deployable jobs (often data-store-coupled with no HTTP surface between them) ---
+# usage-monitor = "usage-monitor-job"
+# cleanup-job   = "cleanup-job"
+
+# --- infrastructure-only repos (PHYSICAL layer only — no call sites to find here) ---
+# Listing these is what surfaces IAM invoke bindings, Pub/Sub wiring, scheduler triggers and
+# deploy-time service URLs. Omitting them is the most common reason a map shows application
+# calls but no deployment topology.
+# platform-infra  = "platform-infrastructure"
+# iam-admin       = "iam-admin"
+# gitops          = "gitops"
+
+# Source repo for the `fmg` serving binary, used ONLY by install.sh's cargo source-build
+# fallback (platforms with no vendored bin/fmg-<platform-tag>). Left to the instance on
+# purpose: the pack ships no vendor repo URL. $FMG_GIT overrides this value.
+# fmg_git = "https://git.example.com/org/fmg"
 
 [stitcher]
-languages = ["python", "javascript"]   # call-site extractors to run
-ground    = true                        # use Serena to ground candidate edges (FP control)
+# Call-site extractors to run. ONLY "python" and "javascript" are implemented; "javascript"
+# covers .js and .ts. An unrecognised entry is silently ignored — adding a language here does
+# not create an extractor for it.
+languages = ["python", "javascript"]
+# ENFORCED, not advisory. With ground = true, emit.py REFUSES to run unless grounding is present
+# and verifiably succeeded (_meta.ok), because an ungrounded edge that looks grounded is the
+# failure this flag exists to prevent. Override deliberately with emit.py --allow-ungrounded,
+# which stamps every affected edge `grounded: false`. Set ground = false if you do not intend to
+# run the oracle at all — that is an honest configuration; a silently skipped gate is not.
+ground    = true
 
-# Optional service-registry hints: map a config-var SUFFIX to a canonical service name.
-# The stitcher auto-discovers most of these from settings/config; hints override.
+# Service-registry hints: map a config-var SUFFIX to a canonical service name. This is the
+# highest-leverage section in the file — it is what turns an unresolved call into a named edge.
+#
+# Matching is case-INSENSITIVE and longest-suffix-first, so ONE hint covers the same setting in
+# every language: "api_base_url" matches Python `settings.api_base_url` AND JS/TS
+# `process.env.API_BASE_URL`.
+#
+# To find what to put here: run the pipeline once and look at the `dynamic` edges. Each one
+# records the expression that failed to resolve, so the unresolved bases in that list are
+# exactly the hints worth adding.
 [services]
 # "frontend_base_url" = "Frontend"
 # "context_base_url"  = "ContextService"
 # "redis_host"        = "Redis"
+
+# WITHOUT [emit.pages], NO EDGE LANDS. An edge is written onto the page of the component it comes
+# from, and this table is the only thing that maps a repo logical-name to a wiki page TITLE. A repo
+# missing here falls back to its own name, which is almost never a page title, so the edge homes on
+# a page that does not exist and the write door drops it as unresolved.
+#
+# Measured on a real workspace: with this table absent, all four derived shared-datastore edges
+# resolved to zero pages and landed nowhere. `emit.py` now names every unmapped repo and prints the
+# exact line to add here, so the failure is loud — but the table still has to be filled in.
+[emit]
+# Page that hosts config-driven fan-out edges (the component that dispatches to downstream tools).
+fanout_page = "Gateway"
+
+[emit.pages]              # repo logical-name -> the REAL wiki page title
+frontend    = "Frontend"
+context-svc = "Context Service"
+api         = "Backend API"
+# every repo in [repos] that can originate an edge needs a line here
+
+[emit.service_pages]      # canonical service label (a derive.py target) -> REAL wiki title
+# Only map labels you are confident about. An unmapped label stays as-is: that is correct for an
+# external or not-yet-modelled service, and the edge still records endpoint + provenance.
+# Frontend = "Frontend"
 
 # Optional: files/globs that declare downstream services (e.g. an MCP/service registry yaml).
 [registry]
@@ -38,9 +116,35 @@ provider = "gcp"                 # gcp | aws | azure
 project = "my-project-test"      # the env's cloud project / account / subscription
 regions = ["us-central1"]
 
+# WHICH VAR-FILE RENDERS THIS ENVIRONMENT'S NAMES. A Terraform `variable` with no `default` has no
+# value in source, so a resource named through one renders `(unset:var.<name>)` and the write door
+# refuses to home an edge on it. The value usually DOES exist — in a `.tfvars` file in the same
+# repo — but two environments' files hold different values for the same variable, so there is no
+# environment-free right answer and `infra.py` will not pick one for you.
+#
+# Name the files here (repo logical name -> path relative to that repo, or a list, later wins as
+# terraform's `-var-file` precedence does) and select the environment at invocation:
+#
+#     python3 stitcher/infra.py --config config/codemap.toml --out infra.json --env test
+#     ./stitcher/run-pipeline.sh --config config/codemap.toml --vault <vault> --env test
+#
+# WITHOUT `--env` no var-file is read at all and behaviour is exactly as if this table were absent.
+# A resolved name records `name_basis: ["tfvars"]` + `name_sources: ["<file>:<line>"]` onto the
+# served edge, so a var-file-derived name never reads as a literal in the module. An unresolved
+# variable that a discovered `.tfvars` DOES set is reported as `tfvars_candidates` on the affected
+# node/edge and left unresolved — "determinable once you say which environment" is a different
+# claim from "no value in source". An `--env` naming an undefined environment, or a file that is
+# not there, exits 64 rather than quietly falling back to defaults.
+[cloud.environments.test.tfvars]
+# frontend    = "terraform/test.tfvars"
+# context-svc = ["terraform/common.tfvars", "terraform/test.tfvars"]
+
 [cloud.environments.prod]
 project = "my-project-prod"
 regions = ["us-central1"]
+
+[cloud.environments.prod.tfvars]
+# frontend    = "terraform/prod.tfvars"
 
 # Per-environment flow (nothing here needs cloud auth except the snapshot step):
 #   1. snapshot  : discovery/gcp/cr-topology.sh --project <env.project> [--regions ...] > topo.<env>.json

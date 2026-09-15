@@ -1,0 +1,15 @@
+# fmg config for the codemap navigation-eval KNOWN-BAD fixture vault.
+# Identical to fixture-vault/.fmg.toml on purpose: the only difference between the two vaults
+# must be the seeded defects in the page content, never the graph configuration. A config
+# difference would make the negative control prove something about config parsing instead.
+[resolve]
+title_field = "title"
+alias_field = "aliases"
+fallback    = "filename_stem"
+
+[fields.direction]
+related_to = "bidirectional"
+
+[display]
+default_depth = 1
+max_depth     = 10

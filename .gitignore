@@ -6,3 +6,4 @@ config/codemap.toml
 .harness-memory/
 __pycache__/
 *.pyc
+.pytest_cache/

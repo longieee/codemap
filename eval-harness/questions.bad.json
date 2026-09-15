@@ -1,0 +1,190 @@
+{
+  "description": "KNOWN-BAD question set — the navigation eval's negative control. Every question here asks a correct, answerable navigation question against bad-fixture-vault, and every one MUST fail, each for a single distinct seeded reason. A run of this set that is not 0/7 means the instrument has stopped being able to detect that class of defect: the fixture is the known-bad input the gate rule requires before a green from questions.json is trusted. `must_fail_because` names the defect; `note_contains` is the substring the runner's failure note must carry, so the control asserts WHICH check tripped rather than merely that something failed.",
+  "label": "known-bad",
+  "vault": "bad-fixture-vault",
+  "questions": [
+    {
+      "id": "B1",
+      "topic": "off-vault edge target: which in-vault service does the Context Service call?",
+      "cmd": "xedges",
+      "node": "Context Service",
+      "expect": {
+        "target": "Frontend",
+        "type": "http-call",
+        "endpoint": "/api/agents/chat",
+        "external_target": false
+      },
+      "must_fail_because": "the edge's target is [[Partner Gateway]], which is not a page in this vault, so the store reports external_target: true and no in-vault target resolves",
+      "note_contains": "external_target=True, want False"
+    },
+    {
+      "id": "B2",
+      "topic": "unresolved template endpoint: what endpoint does the Reporting Job call on the Frontend?",
+      "cmd": "xedges",
+      "node": "Reporting Job",
+      "expect": {
+        "target": "Frontend",
+        "type": "http-call",
+        "endpoint_resolved": true
+      },
+      "must_fail_because": "the served endpoint is /api/{tenant}/export — an unresolved {template}, a shape rather than an address",
+      "note_contains": "resolved=False"
+    },
+    {
+      "id": "B3",
+      "topic": "condition-less http-call: under what condition does the Frontend call the Backend?",
+      "cmd": "xedges",
+      "node": "Frontend",
+      "expect": {
+        "target": "Backend",
+        "type": "http-call",
+        "condition_present": true
+      },
+      "must_fail_because": "the http-call edge carries no condition: key at all, so the 'under what condition' half of the question has no served answer",
+      "note_contains": "condition_present=False, want True"
+    },
+    {
+      "id": "B4",
+      "topic": "self-confirming substring: is the `roles` collection in the Scheduler's shared-store coupling?",
+      "cmd": "xedges",
+      "node": "Scheduler",
+      "expect": {
+        "target": "Frontend",
+        "type": "shares-datastore",
+        "endpoint": [
+          "roles",
+          "users"
+        ]
+      },
+      "must_fail_because": "the collection list states accessroles,aclentries,agents,groups,users and NOT roles — a containment test against the stdout blob stays GREEN because `accessroles` contains the substring `roles`; only token-exact endpoint matching fails here",
+      "note_contains": "token-exact"
+    },
+    {
+      "id": "B5",
+      "topic": "stale provenance: at which source line does the Audit Sink's store coupling live?",
+      "cmd": "xedges",
+      "node": "Audit Sink",
+      "expect": {
+        "target": "Frontend",
+        "type": "data-store",
+        "provenance": "audit-sink/src/sink.py:41"
+      },
+      "must_fail_because": "the edge still points at sink.py:9, the line the call used to occupy — a provenance pointer that no longer resolves cannot be verified against code",
+      "note_contains": "provenance 'audit-sink/src/sink.py:9'"
+    },
+    {
+      "id": "B6",
+      "topic": "hop bar exceeded (query): does the Edge Relay reach the Frontend within 3 hops?",
+      "cmd": "query",
+      "node": "Edge Relay",
+      "expect": [
+        "Frontend"
+      ],
+      "max_hops": 3,
+      "must_fail_because": "the Frontend sits 4 hops from the Edge Relay. Issued at --depth max_hops the target is simply absent and gets mis-reported as unreachable; probing to max_hops+2 finds it at hop 4 and fails it against the declared bar of 3",
+      "note_contains": "4 hops > max_hops 3"
+    },
+    {
+      "id": "B7",
+      "topic": "hop bar exceeded (bridge): shortest path from the Edge Relay to the Frontend",
+      "cmd": "bridge",
+      "from": "Edge Relay",
+      "to": "Frontend",
+      "expect": [
+        "Tier Two"
+      ],
+      "max_hops": 3,
+      "must_fail_because": "the store's own BFS returns a 4-link path (Edge Relay -> Tier One -> Tier Two -> Tier Three -> Frontend) against a declared bar of 3",
+      "note_contains": "4 hops > max_hops 3"
+    },
+    {
+      "id": "B8",
+      "topic": "dynamic distinguishability: is the Bad Report Gateway's dynamic family distinguishable from a resolved call?",
+      "cmd": "xedges",
+      "node": "Bad Report Gateway",
+      "expect": {
+        "target": "Bad Unresolved Target",
+        "type": "dynamic",
+        "unresolved_expr_present": true
+      },
+      "expect_absent": {
+        "type": "dynamic",
+        "unresolved_expr_present": false
+      },
+      "must_fail_because": "a second edge is typed `dynamic` while stating no unresolved expression at all, so nothing downstream can tell which call site could not be resolved or act on it — the family is present but not distinguishable",
+      "note_contains": "FORBIDDEN description matched"
+    },
+    {
+      "id": "B9",
+      "topic": "physical subscribes-to provenance: which declaration creates the Bad Report Queue subscription?",
+      "cmd": "xedges",
+      "node": "Bad Report Gateway",
+      "expect": {
+        "target": "Bad Report Queue",
+        "type": "subscribes-to",
+        "provenance": "bad-report-gateway/terraform/pubsub.tf:5"
+      },
+      "must_fail_because": "the subscribes-to edge names a target and a type and carries no provenance at all, so nothing ties it to a declaration file a reader could open",
+      "note_contains": "edge carries no provenance"
+    },
+    {
+      "id": "B10",
+      "topic": "freshness: which commit was the Bad Report Gateway's dynamic edge extracted from?",
+      "cmd": "xedges",
+      "node": "Bad Report Gateway",
+      "expect": {
+        "target": "Bad Unresolved Target",
+        "type": "dynamic",
+        "extracted_from_sha_known": true
+      },
+      "must_fail_because": "extracted_from.sha is the literal string 'unknown', so the record cannot be tied to a commit and its staleness is unknowable",
+      "note_contains": "extracted_from.sha='unknown' known=False"
+    },
+    {
+      "id": "B11",
+      "topic": "freshness completeness: when was the Bad Report Gateway's invokes edge extracted?",
+      "cmd": "xedges",
+      "node": "Bad Report Gateway",
+      "expect": {
+        "target": "Frontend",
+        "type": "invokes",
+        "extracted_from_complete": true
+      },
+      "must_fail_because": "the invokes edge's extracted_from omits `at`. Measured consequence: the STORE drops the whole incomplete object rather than serving a partial one, so the served edge carries no extracted_from at all",
+      "note_contains": "edge carries no extracted_from object"
+    },
+    {
+      "id": "B12",
+      "topic": "co-writer lookup: which collections does the Bad Report Gateway share with the Frontend?",
+      "cmd": "xedges",
+      "node": "Bad Report Gateway",
+      "expect": {
+        "target": "Frontend",
+        "type": "shares-datastore",
+        "store": "mongo",
+        "collections": [
+          "reports",
+          "report_runs"
+        ]
+      },
+      "must_fail_because": "the flat `endpoint` string still advertises mongo:reports,report_runs while the structured `collections` list a consumer actually reads carries only `reports` — the same self-confirming shape as the deleted `,roles`, one level up",
+      "note_contains": "does not carry ['report_runs']"
+    },
+    {
+      "id": "B13",
+      "topic": "blast radius: does the Bad Report Gateway WRITE the collections it shares with the Frontend?",
+      "cmd": "xedges",
+      "node": "Bad Report Gateway",
+      "expect": {
+        "target": "Frontend",
+        "type": "shares-datastore",
+        "access_this": [
+          "r",
+          "w"
+        ]
+      },
+      "must_fail_because": "access.this claims read-only while the edge is a writer in reality, so a blast-radius question returns the wrong answer with full confidence",
+      "note_contains": "access.this=['r'] does not carry ['w']"
+    }
+  ]
+}

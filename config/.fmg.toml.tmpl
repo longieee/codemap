@@ -11,3 +11,24 @@ related_to = "bidirectional"
 [display]
 default_depth = 1
 max_depth     = 10
+
+# Pages the vault scan must NOT treat as content. A vault carries its own machinery —
+# schema templates, harness prompts, vendored skill copies, analysis scratch — and
+# grading that machinery as content makes the content signal unusable: on one measured
+# 109-page vault, 30 of 37 reported orphans were `_harness/`, `_schema/` and `_skills/`
+# files, so the ~4 unreachable CONTENT pages were buried 8:1 in noise and nobody
+# triaged them. Matched per PATH SEGMENT with shell-glob semantics, so "_*" excludes
+# `_schema/service.md` and anything below `_harness/`.
+#
+# Both sides honour this key: the fmg store when it scans, `tools/lint.py` when it
+# grades, so the two work over the same page set. Verified on the bundled binary —
+# a 111-page vault scans as 111 with `exclude = []`, 80 with the value below, and 75
+# with "runbooks" added. An older fmg had no exclude mechanism at all; if changing
+# this key does not move `fmg describe`'s page count, the binary predates it.
+#
+# Note the two orphan definitions differ BY DESIGN and their counts will not match:
+# `fmg orphans` = no links in or out; `codemap lint --check orphans` = no links IN
+# (unreachable by navigation), which is what the maintainer skill specifies.
+# Widen it per vault; do not narrow it to nothing without a reason.
+[scan]
+exclude = ["_*", ".*"]

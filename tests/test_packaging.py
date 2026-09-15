@@ -17,8 +17,18 @@ Stdlib only (no pytest, no third-party imports). Runnable two ways:
     pytest tests/test_packaging.py     # stays pytest-compatible
 
 Criteria that require executing `fmg` (contract group F, the navigation eval)
-SKIP with a clear message when no `fmg` can be located (neither on PATH nor at
-bin/fmg-<platform-tag>). Every other criterion is checked unconditionally.
+FAIL -- they do NOT skip -- when no `fmg` can be located (neither at
+bin/fmg-<platform-tag>, nor at bin/fmg, nor on PATH). They used to skip, and the
+plain runner exits 0 on skips, so the only product-bar test in the suite
+vanished on a clean machine and a bundle shipping no usable serving binary
+reported a green suite. A pack that must vendor a binary for this platform
+(criterion D11) and cannot locate one is broken, not untested. Every criterion
+is therefore checked unconditionally.
+
+`fmg` is located by _locate_fmg() in the SAME order as the eval runner
+(eval-harness/navigation-eval.py::locate_fmg) and passed to the runner with an
+explicit --fmg, so the binary this suite proves capable is the binary the
+measurement runs.
 
 The package root is located relative to this test file:
     pathlib.Path(__file__).resolve().parent.parent
@@ -51,14 +61,44 @@ SKILL_DIRS = {"wiki-init", "wiki-maintainer", "wiki-tools"}
 
 # Contract C10: the real instance repo directory names that MUST NOT leak into
 # the generic config template.
+#
+# These literals ARE client names, and criterion 22 forbids client names in shipped files. They
+# are the one sanctioned exception: a detector cannot detect a name it does not carry, and the
+# alternatives all fail worse -- reading the set from the (git-ignored, per-instance)
+# config/codemap.toml would make C10 pass vacuously on any machine without that file, which is a
+# check that passes on absent evidence. The `boundary-allow` marker below is what exempts each
+# line from criterion 22's scan; it is per-LINE and reviewable, never file-wide.
 INSTANCE_REPO_NAMES = [
-    "aiconsole_scheduler_service",
-    "librechat",
-    "mcp-user-context-info",
-    "helperai-data",
-    "common-agent-usage-monitor",
-    "helperai-clean-up-conversation-job",
+    "aiconsole_scheduler_service",          # boundary-allow: C10 detector literal
+    "librechat",                            # boundary-allow: C10 detector literal
+    "mcp-user-context-info",                # boundary-allow: C10 detector literal
+    "helperai-data",                        # boundary-allow: C10 detector literal
+    "common-agent-usage-monitor",           # boundary-allow: C10 detector literal
+    "helperai-clean-up-conversation-job",   # boundary-allow: C10 detector literal
 ]
+
+# Contract 22: the client-boundary token set. A pack that deploys into consumer workspaces must
+# carry no real client, service, repo, host or person name. Matched case-insensitively as a
+# substring, over the WHOLE shippable set (docs/ and tests/ included -- they ship too).
+CLIENT_BOUNDARY_TOKENS = [
+    "helperai",     # boundary-allow: criterion-22 detector literal
+    "librechat",    # boundary-allow: criterion-22 detector literal
+    "aiconsole",    # boundary-allow: criterion-22 detector literal
+    "aeris",        # boundary-allow: criterion-22 detector literal
+    "longie",       # boundary-allow: criterion-22 detector literal
+    "seta",         # boundary-allow: criterion-22 detector literal
+]
+
+# The marker that exempts a single line from the criterion-22 scan.
+BOUNDARY_ALLOW_MARKER = "boundary-allow"
+
+# Destination-only stamps written by deploy.sh into a VENDORED copy (canonical identity + refresh
+# source). They are not pack content -- the canonical pack never has them -- so they are outside
+# the shippable set, and PACK_SOURCE legitimately records a local path.
+_DEST_ONLY_STAMPS = {"PROVENANCE", "PACK_SOURCE"}
+# Never part of the shippable set (contract "Terms"): install receipt + candidate queues.
+_NON_SHIPPABLE_FILES = {".install-lock"}
+_NON_SHIPPABLE_GLOBS = ("*.candidates.json",)
 
 # Contract E15: the seven declared dependencies, by the keyword the script must
 # contain. `uv` is satisfied by `uv` OR `uvx`.
@@ -79,7 +119,7 @@ SEVEN_DEP_PATTERNS = {
 # the operational files an install actually uses do not leak host specifics or
 # ship secret plumbing. Whole-tree dirs walked (text files only):
 _OPERATIONAL_DIRS = ["skills", "stitcher", "init", "discovery", "eval-harness",
-                     "manifests", ".claude-plugin"]
+                     "manifests", ".claude-plugin", "tools"]
 
 # Directory / file names never part of the shippable set (contract "Terms").
 _PRUNE_DIRS = {".git", ".venv", "__pycache__", ".harness-memory", "node_modules"}
@@ -107,23 +147,42 @@ def _vendored_binary_path():
 
 def _locate_fmg():
     """Locate fmg the way the contract says the harness may: the vendored
-    bin/fmg-<platform-tag> (if executable), else `fmg` on PATH. None if neither."""
-    vend = _vendored_binary_path()
-    if vend.is_file() and os.access(str(vend), os.X_OK):
-        return str(vend)
-    which = shutil.which("fmg")
-    if which:
-        return which
-    return None
+    bin/fmg-<platform-tag> (if executable), else the installer-materialized
+    bin/fmg, else `fmg` on PATH. None if none of the three.
+
+    This order is IDENTICAL to eval-harness/navigation-eval.py::locate_fmg, and
+    the identity is the point. It previously diverged -- this helper checked
+    vendored-first while the runner checked PATH-first -- so on a machine
+    carrying an `fmg` on PATH that prints the same version string but lacks
+    `xedges`, the guard proved a capable binary and then the measurement ran a
+    different, incapable one: four of six fixture questions became
+    `unrecognized subcommand` errors and F20 was red with nothing in the output
+    naming the binary. A guard that does not test the binary under measurement
+    is not a guard. F20 also passes --fmg explicitly so the two cannot drift
+    apart again silently.
+    """
+    for cand in (_vendored_binary_path(), ROOT / "bin" / "fmg"):
+        if cand.is_file() and os.access(str(cand), os.X_OK):
+            return str(cand)
+    return shutil.which("fmg")
 
 
 def _require_fmg():
+    """Return a located fmg, or FAIL.
+
+    Deliberately NOT a skip. The runner exits 0 on skips, so raising SkipTest
+    here made the only product-bar test in the suite vanish on a clean machine:
+    a bundle shipping no usable serving binary reported a green suite. A pack
+    that vendors bin/fmg-<platform-tag> for this platform and cannot locate it
+    is broken, and that is a failure, not an absence.
+    """
     fmg = _locate_fmg()
-    if fmg is None:
-        raise unittest.SkipTest(
-            "fmg not on PATH and no bin/fmg-%s; contract group F (navigation eval) skipped"
-            % _platform_tag()
-        )
+    assert fmg is not None, (
+        "F20: no fmg is locatable -- not at bin/%s (the vendored binary this pack MUST ship "
+        "for this platform, criterion D11), not at bin/fmg, and not on PATH. The product bar "
+        "cannot be measured, which is a FAILURE and not a skip: skipping it let a bundle with "
+        "no serving binary report a green suite." % _vendored_binary_path().name
+    )
     return fmg
 
 
@@ -183,6 +242,29 @@ def _iter_operational_files():
         singles.append(tmpl)
     for p in singles:
         if p.exists() and p.is_file():
+            yield p
+
+
+def _iter_shippable_files():
+    """Yield every file in the SHIPPABLE set (contract "Terms") -- wider than
+    _iter_operational_files(): docs/ and tests/ are included, because they ship.
+
+    Excluded: the pruned dirs (.git, .venv, __pycache__, .harness-memory,
+    node_modules), *.pyc, the git-ignored instance config config/codemap.toml,
+    the install receipt, candidate queues, and deploy.sh's destination-only
+    stamps (PROVENANCE / PACK_SOURCE -- present in a vendored copy, never in the
+    pack). Binary files are yielded; callers skip them via _safe_text().
+    """
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
+        for fn in filenames:
+            if fn.endswith(".pyc") or fn in _NON_SHIPPABLE_FILES or fn in _DEST_ONLY_STAMPS:
+                continue
+            if any(fnmatch.fnmatch(fn, g) for g in _NON_SHIPPABLE_GLOBS):
+                continue
+            p = pathlib.Path(dirpath) / fn
+            if fn == "codemap.toml" and p.parent.name == "config":
+                continue  # git-ignored per-instance config: not shippable
             yield p
 
 
@@ -574,6 +656,54 @@ def test_c10_config_template_generic_and_instance_gitignored():
 
 
 # =========================================================================== #
+# H. Client boundary -- no client names anywhere in the shippable set         #
+# =========================================================================== #
+def test_c22_no_client_boundary_names():
+    """Contract 22: no line of any text file in the SHIPPABLE set carries a
+    client/service/repo/host/person name from CLIENT_BOUNDARY_TOKENS. The only
+    exemption is a line carrying the literal `boundary-allow` marker (the
+    detector's own pattern literals, criterion 10) -- per line, never per file.
+
+    Scope, stated rather than assumed: text files only. The vendored
+    bin/fmg-<platform-tag> is binary and is NOT scanned; it currently embeds the
+    build machine's cargo-registry paths, which a rebuild with
+    --remap-path-prefix is expected to clear (packaging-contract criterion 22).
+
+    Liveness self-check: the scan must actually match something somewhere, or a
+    broken pattern would read as a clean pack. The marked detector-literal lines
+    are the known-positive population -- if ignoring the markers does not
+    produce any hit, this instrument is silent and the test fails on that.
+    """
+    assert CLIENT_BOUNDARY_TOKENS, "22: the boundary token set is empty -- nothing would be detected"
+    pat = re.compile("|".join(re.escape(t) for t in CLIENT_BOUNDARY_TOKENS), re.IGNORECASE)
+
+    offenders = []
+    exempted = 0
+    for p in _iter_shippable_files():
+        text = _safe_text(p)
+        if text is None:
+            continue  # binary artifact -- out of scope for a text scan (see docstring)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            m = pat.search(line)
+            if not m:
+                continue
+            if BOUNDARY_ALLOW_MARKER in line:
+                exempted += 1
+                continue
+            offenders.append("%s:%d: %s" % (_rel(p), lineno, m.group(0)))
+
+    assert exempted > 0, (
+        "22: the boundary scan matched NOTHING, not even the marked detector literals in this "
+        "file -- the instrument is silent (broken pattern or empty file walk), so a clean result "
+        "here would be meaningless"
+    )
+    assert not offenders, (
+        "22: client/host/person name(s) in the shippable set (neutralize, keeping the "
+        "illustrative shape -- see packaging-contract criterion 22): %r" % sorted(offenders)
+    )
+
+
+# =========================================================================== #
 # D. Vendored binary + build fallback                                         #
 # =========================================================================== #
 def test_d11_vendored_binary_present_and_runs():
@@ -615,10 +745,24 @@ def test_e14_check_flag_no_mutation():
     create .venv/ and MUST NOT write .install-lock (no mutation). It advertises
     a `--check` flag and can emit `FAIL` lines on missing deps.
 
-    Per the harness steer, the runtime assertion verifies the no-mutation
-    property (environment-independent), NOT a specific exit code (deps may be
-    present or absent in the test env). The script is run inside a clean copy so
-    the real package is never touched."""
+    The runtime assertions are three, and the first two were absent: this test
+    used to DISCARD the return code and never look at stdout, so it passed
+    against an `install.sh` consisting of nothing but `exit 0` -- verified. A
+    preflight that reports nothing and returns nothing is indistinguishable from
+    one that works, so:
+
+      1. STATUS. `--check` must exit with a defined preflight status -- 0 (all
+         satisfied) or 1 (something missing) -- not a crash/usage code.
+      2. REPORT. Its stdout must actually report on EACH of the seven declared
+         dependencies (E15's set). This is environment-independent: the script
+         names each dependency on both its ok and its FAIL branch.
+      3. CONSISTENCY. Status and report must agree, in BOTH directions: a
+         printed FAIL line requires a non-zero exit, and a clean report requires
+         exit 0. This is what a bare `exit 0` and a silent-failure script cannot
+         both satisfy, and neither can a script that prints FAIL and exits 0.
+
+    Plus the original no-mutation property. The script is run inside a clean copy
+    so the real package is never touched."""
     assert INSTALL.is_file(), "E14: install.sh missing"
     text = _read_text(INSTALL)
 
@@ -626,7 +770,7 @@ def test_e14_check_flag_no_mutation():
     assert re.search(r"--check\b", text), "E14: install.sh must recognize a --check flag"
     assert "FAIL" in text, "E14: --check preflight must be able to print FAIL lines"
 
-    # Runtime no-mutation: run --check in a clean sandbox copy.
+    # Runtime: run --check in a clean sandbox copy.
     def _ignore(_dir, names):
         return [n for n in names if n in _PRUNE_DIRS or n.endswith(".pyc") or n == ".install-lock"]
 
@@ -636,8 +780,8 @@ def test_e14_check_flag_no_mutation():
         assert not os.path.exists(os.path.join(sandbox, ".venv")), \
             "E14: sandbox baseline should have no .venv (copy excludes it)"
         try:
-            subprocess.run(["bash", "install.sh", "--check"], cwd=sandbox,
-                           capture_output=True, text=True, timeout=90)
+            res = subprocess.run(["bash", "install.sh", "--check"], cwd=sandbox,
+                                 capture_output=True, text=True, timeout=90)
         except subprocess.TimeoutExpired:
             raise AssertionError("E14: `install.sh --check` did not exit within 90s "
                                  "(a preflight must not hang / must do no network work)")
@@ -645,6 +789,42 @@ def test_e14_check_flag_no_mutation():
             "E14: --check MUST NOT create .venv/ (mutation detected)"
         assert not os.path.exists(os.path.join(sandbox, ".install-lock")), \
             "E14: --check MUST NOT write .install-lock (mutation detected)"
+
+        # 1. STATUS -- a defined preflight status, not a crash or a usage error.
+        assert res.returncode in (0, 1), (
+            "E14: `install.sh --check` must exit 0 (all satisfied) or 1 (something missing); "
+            "got rc=%d\nstdout=%s\nstderr=%s" % (res.returncode, res.stdout, res.stderr)
+        )
+
+        # 2. REPORT -- stdout names every declared dependency it preflighted.
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", res.stdout or "")
+        assert plain.strip(), (
+            "E14: `install.sh --check` printed NOTHING to stdout. A preflight that reports "
+            "nothing cannot be distinguished from one that does no checking -- this assertion "
+            "is what fails an install.sh that is merely `exit 0`."
+        )
+        unreported = [name for name, pat in SEVEN_DEP_PATTERNS.items()
+                      if not re.search(pat, plain, re.IGNORECASE)]
+        assert not unreported, (
+            "E14: --check stdout does not report on these declared dependencies %r -- a "
+            "dependency the preflight never mentions is one it silently skipped\nstdout=%s"
+            % (unreported, plain)
+        )
+
+        # 3. CONSISTENCY -- the status agrees with the report, in both directions.
+        fail_lines = [ln for ln in plain.splitlines() if re.search(r"\bFAIL\b", ln)]
+        if fail_lines:
+            assert res.returncode != 0, (
+                "E14: --check printed %d FAIL line(s) and STILL exited 0 -- a preflight whose "
+                "exit code does not follow its own findings is a silent failure: %r"
+                % (len(fail_lines), fail_lines)
+            )
+        else:
+            assert res.returncode == 0, (
+                "E14: --check printed no FAIL line yet exited %d -- the status does not follow "
+                "the report\nstdout=%s\nstderr=%s"
+                % (res.returncode, plain, res.stderr)
+            )
 
 
 def test_e15_install_sh_references_seven_deps():
@@ -764,40 +944,476 @@ def test_f18_eval_harness_files_and_fixture_vault():
 
 
 def test_f19_questions_min_five_maxhops_le_three():
-    """Contract F19: questions.json contains >= 5 navigation questions, each with
-    a max_hops of <= 3 (and a positive integer)."""
+    """Contract F19: questions.json contains >= 5 navigation questions, and every
+    question that MAKES a hop claim carries a max_hops of <= 3 (a positive int).
+
+    Scoped to traversal questions (`bridge` / `query`), and the scoping is the
+    check. An `xedges` question is a single typed-record read with no traversal
+    to count, so a max_hops on one is a field that is declared and never read --
+    residue that reads as a bar the question is being held to when it is not.
+    Requiring it everywhere is what put that residue there. So this asserts BOTH
+    directions: present and in [1,3] on a traversal question, and ABSENT on an
+    xedges one, which is what stops it drifting back in. The runner enforces the
+    same rule (navigation-eval.py::validate_spec) and rejects a set that breaks
+    it with exit 5.
+
+    Also asserts the set still exercises BOTH measurements -- a set that quietly
+    lost all its traversal questions would otherwise satisfy "5 questions, no bad
+    max_hops" while no longer measuring the hop bar at all.
+    """
     questions = ROOT / "eval-harness" / "questions.json"
     assert questions.is_file(), "F19: eval-harness/questions.json missing"
     data = _load_json(questions)
     qs = data["questions"] if isinstance(data, dict) and "questions" in data else data
     assert isinstance(qs, list), "F19: questions.json must yield a list of questions"
     assert len(qs) >= 5, "F19: need >= 5 navigation questions, got %d" % len(qs)
+    n_traversal = 0
     for i, q in enumerate(qs):
         assert isinstance(q, dict), "F19: question %d must be an object" % i
-        mh = q.get("max_hops")
-        assert isinstance(mh, int) and not isinstance(mh, bool), \
-            "F19: question %d max_hops must be an int, got %r" % (i, mh)
-        assert 1 <= mh <= 3, "F19: question %d max_hops must be in [1,3], got %r" % (i, mh)
+        cmd = q.get("cmd")
+        if cmd in ("bridge", "query"):
+            n_traversal += 1
+            mh = q.get("max_hops")
+            assert isinstance(mh, int) and not isinstance(mh, bool), \
+                "F19: question %d (%s, a traversal) max_hops must be an int, got %r" \
+                % (i, cmd, mh)
+            assert 1 <= mh <= 3, \
+                "F19: question %d max_hops must be in [1,3], got %r" % (i, mh)
+        else:
+            assert "max_hops" not in q, (
+                "F19: question %d (%s) carries max_hops=%r. A typed-edge lookup makes no hop "
+                "claim, so the field would be declared and never read -- remove it."
+                % (i, cmd, q.get("max_hops")))
+    assert n_traversal >= 1, (
+        "F19: questions.json has no bridge/query question left, so the <= 3-hop traversal bar "
+        "is not measured by the product-bar set at all")
 
 
 def test_f20_navigation_eval_runs_green():
     """Contract F20: `python3 eval-harness/navigation-eval.py` (default target =
-    bundled fixture vault), with a working fmg available, exits 0 and reports
-    every question resolved within its max_hops (<= 3). Skips if fmg cannot be
-    located."""
-    _require_fmg()  # skip cleanly if neither PATH nor vendored fmg is available
+    bundled fixture vault) exits 0 and reports every question answered.
+
+    FAILS rather than skips when no fmg is locatable (see _require_fmg), and
+    passes --fmg EXPLICITLY so the binary this test proved capable is the binary
+    the measurement runs.
+
+    The banner is asserted too: an eval that does not say which binary it
+    measured, at which version, with which subcommands, produced a 2/6 that read
+    as a content result when it was an incapable-binary result.
+    """
+    fmg = _require_fmg()
     runner = ROOT / "eval-harness" / "navigation-eval.py"
     assert runner.is_file(), "F20: eval-harness/navigation-eval.py missing"
     try:
-        res = subprocess.run([sys.executable, str(runner)], cwd=str(ROOT),
+        res = subprocess.run([sys.executable, str(runner), "--fmg", fmg], cwd=str(ROOT),
                              capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:
         raise AssertionError("F20: navigation-eval.py did not finish within 180s")
     assert res.returncode == 0, (
-        "F20: eval must exit 0 with every question resolved within max_hops; "
-        "rc=%d\nstdout=%s\nstderr=%s" % (res.returncode, res.stdout, res.stderr)
+        "F20: eval must exit 0 with every question answered; rc=%d\nstdout=%s\nstderr=%s"
+        % (res.returncode, res.stdout, res.stderr)
     )
-    assert res.stdout.strip(), "F20: eval must print a per-question table to stdout"
+    out = res.stdout
+    assert out.strip(), "F20: eval must print a per-question table to stdout"
+    for needle in ("fmg --version", "subcommands", "questions answered"):
+        assert needle in out, \
+            "F20: eval banner/summary must report %r (binary identity + result); got:\n%s" \
+            % (needle, out)
+
+
+def test_f20c_pending_capability_set_is_blocked_or_green_never_silent():
+    """NEGATIVE CONTROL for the served-field probe -- not a new contract criterion.
+
+    questions.store-surface.json reads PHYSICAL edge attributes (role, schedule,
+    via, value, source) that stitcher/emit.py::physical_obj writes and the
+    serving binary does not currently pass through. There are exactly two
+    acceptable outcomes and this test names both, so the set needs no edit when
+    the store changes under it:
+
+      * exit 6, `CAUSE: incapable-store`, naming the dropped keys -- the store
+        does not serve them yet; or
+      * exit 0 with every question answered -- the store now serves them.
+
+    What is NOT acceptable is the third outcome: questions FAILING because a
+    field is missing from the record. That would make one gate answer two
+    different questions ("did the pipeline emit it?" and "does the store serve
+    it?") and would be read as a pipeline defect when it is a store gap. The
+    probe exists to keep those apart, and this test is what proves the probe
+    still does it.
+
+    This is not hypothetical: on 2026-09-14 a store rebuild began serving
+    `confidence`, `grounded`, `endpoint_expr` and `unresolved_exprs` while
+    keeping the SAME `fmg 0.1.0` version string and the SAME subcommand set. The
+    version check could not see it and the subcommand probe could not see it;
+    the served-field probe did, and those questions moved into questions.json.
+    """
+    fmg = _require_fmg()
+    runner = ROOT / "eval-harness" / "navigation-eval.py"
+    qs = ROOT / "eval-harness" / "questions.store-surface.json"
+    assert qs.is_file(), "F20c: eval-harness/questions.store-surface.json missing"
+    n = len(_load_json(qs)["questions"])
+    try:
+        res = subprocess.run([sys.executable, str(runner), "--fmg", fmg, "--questions", str(qs)],
+                             cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("F20c: navigation-eval.py did not finish within 180s")
+    out = res.stdout + res.stderr
+    if res.returncode == 6:
+        assert "CAUSE: incapable-store" in out, (
+            "F20c: exit 6 must name its cause as incapable-store so a reader is not left to "
+            "guess whether the store or the pipeline is at fault:\n%s" % out)
+        assert "is read by:" in out, (
+            "F20c: the incapable-store report must name WHICH served key each blocked expect "
+            "field reads -- otherwise it says only that something is missing:\n%s" % out)
+        return
+    assert res.returncode == 0, (
+        "F20c: a pending-capability set must be BLOCKED (exit 6, incapable-store) or GREEN "
+        "(exit 0). rc=%d means its questions were scored against a record that may not carry "
+        "the fields they read, which reports a store gap as a pipeline defect.\n%s"
+        % (res.returncode, out))
+    assert "%d/%d questions answered" % (n, n) in out, (
+        "F20c: exit 0 must mean every question answered; got:\n%s" % out)
+
+
+def test_f20d_field_probe_vault_ships_and_covers_every_declared_field():
+    """Contract-adjacent: the served-field probe's vault must SHIP and must
+    actually carry every field any bundled question set reads.
+
+    The probe answers "does the store serve field X" by reading a vault that
+    carries X. If the vault is missing the field, the probe reports it as
+    dropped by the store -- a false accusation that would block a question set
+    for the wrong reason. So the vault's coverage is itself checked, from the
+    same table the runner uses, rather than maintained by hand.
+    """
+    ev = ROOT / "eval-harness"
+    probe = ev / "field-probe-vault"
+    assert probe.is_dir(), "F20d: eval-harness/field-probe-vault/ missing"
+    assert (probe / ".fmg.toml").is_file(), "F20d: field-probe-vault needs a .fmg.toml"
+    blob = "\n".join(
+        _safe_text(os.path.join(dp, fn)) or ""
+        for dp, dn, fns in os.walk(probe) for fn in fns)
+    assert "cross_service:" in blob, "F20d: field-probe-vault must carry typed edges"
+
+    # Read the runner's own field -> served-key table so the coverage requirement cannot
+    # drift from what the probe actually checks. Keys and VALUES must be kept apart: an
+    # expect field (`access_this`) is not a served key (`access`), and conflating them makes
+    # this test demand frontmatter that no emitter ever writes -- which is how it first failed.
+    runner_src = _read_text(ev / "navigation-eval.py")
+    m = re.search(r"^FIELD_TO_SERVED_KEY\s*=\s*\{(.*?)^\}", runner_src, re.S | re.M)
+    assert m, "F20d: could not find FIELD_TO_SERVED_KEY in navigation-eval.py"
+    alias_src = re.search(r"^_UNRESOLVED_EXPR_KEYS\s*=\s*\((.*?)\)", runner_src, re.S | re.M)
+    aliases = set(re.findall(r'"([a-z_]+)"', alias_src.group(1))) if alias_src else set()
+    field_to_keys = {}
+    for fm in re.finditer(r'"([a-z_]+)"\s*:\s*(?:"([a-z_]+)"|(_UNRESOLVED_EXPR_KEYS))',
+                          m.group(1)):
+        field, single, alias_ref = fm.group(1), fm.group(2), fm.group(3)
+        field_to_keys[field] = {single} if single else set(aliases)
+    assert field_to_keys, "F20d: FIELD_TO_SERVED_KEY parsed as empty"
+
+    declared = set()
+    for qf in ev.glob("questions*.json"):
+        for q in _load_json(qf)["questions"]:
+            for block in ("expect", "expect_absent"):
+                exp = q.get(block)
+                if isinstance(exp, dict):
+                    declared |= set(exp)
+    unmapped = sorted(f for f in declared if f not in field_to_keys)
+    assert not unmapped, (
+        "F20d: question sets declare %r, which FIELD_TO_SERVED_KEY does not map to a served "
+        "key -- the probe cannot check whether the store serves them" % unmapped)
+    # `to`/`type`/`external_target` are synthesized by the store from the edge itself and are
+    # never frontmatter keys; an alias set needs only ONE of its names present.
+    synthesized = {"to", "type", "external_target"}
+    absent = []
+    for f in sorted(declared):
+        keys = field_to_keys[f] - synthesized
+        if keys and not any(("%s:" % k) in blob for k in keys):
+            absent.append("%s (reads %s)" % (f, "|".join(sorted(keys))))
+    assert not absent, (
+        "F20d: field-probe-vault does not carry %r, which a bundled question set reads. The "
+        "probe would report them as dropped by the store -- blocking a question set for a "
+        "defect in the probe vault rather than in the store." % absent)
+
+
+_EMITTER_SOURCES = ("infra.py", "reconcile.py", "derive.py", "datastore.py", "emit.py")
+
+
+def _emitter_edge_types():
+    """Every edge-type string literal the stitcher can emit, read from its source.
+
+    Two extraction routes, both reported, because neither alone is honest:
+      * STRUCTURAL -- the third positional argument of an edge constructor
+        (`self.edge(a, b, "type")` / `E(a, b, "type")`), which is where infra.py
+        and reconcile.py name a physical family;
+      * LITERAL -- any hyphenated lowercase string literal in those files, which
+        catches the logical names that reach the record through a dict
+        (`{"type": edge["kind"]}` in emit.py) rather than a constructor call.
+    """
+    stitcher = ROOT / "stitcher"
+    structural, literal = set(), set()
+    for name in _EMITTER_SOURCES:
+        src = _safe_text(str(stitcher / name)) or ""
+        # (a) third positional argument of an edge constructor.
+        structural |= set(re.findall(
+            r'(?:self\.edge|\bE)\(\s*[^,()]+,\s*[^,()]+,\s*"([a-z][a-z0-9-]*)"', src))
+        # (b) an edge type chosen by a ternary bound to an edge-type variable. Scoped to
+        #     `et = ...` deliberately: a bare `else "x"` sweep also collects `"med"` (a
+        #     confidence level, derive.py:173), `"write"` (an access mode, datastore.py:107)
+        #     and `"cloud-run-service"` (a NODE kind, infra.py:306), none of which are edge
+        #     types. That over-match made this check demand questions about non-edges --
+        #     found by running it.
+        for m in re.finditer(r'\bet\s*=\s*"([a-z][a-z0-9-]*)"\s+if\b.*?\belse\s+'
+                             r'"([a-z][a-z0-9-]*)"', src):
+            structural |= {m.group(1), m.group(2)}
+        # (c) a logical family named by the `kind=` of a candidate EDGE record; `kind` becomes
+        #     the served `type` at emit.py:141. This is how `dynamic` reaches the record -- it
+        #     never appears in an edge constructor, and a hyphen-only literal sweep misses it
+        #     because it is a single word.
+        #     Scoped to `self.add(kind=...)`, which adds a candidate edge, and NOT to
+        #     `self.node(..., kind=...)`, which names a node. The same keyword means two
+        #     different things in two files, and sweeping both collected 34 node kinds
+        #     (`cloud-run-service`, `pubsub-topic`, `datastore-bucket`, ...) as though the
+        #     eval owed them questions -- found by running it.
+        structural |= set(re.findall(r'self\.add\(\s*kind\s*=\s*"([a-z][a-z0-9-]*)"', src))
+        # (d) any explicit `"type": "..."` mapping written into an emitted object.
+        structural |= set(re.findall(r'"type"\s*:\s*"([a-z][a-z0-9-]*)"', src))
+        literal |= set(re.findall(r'"([a-z][a-z0-9]*(?:-[a-z0-9]+)+)"', src))
+    return structural, literal
+
+
+def test_f20e_question_types_exist_in_the_emitter():
+    """Every `type` a bundled question asserts must be a type the stitcher can
+    actually emit.
+
+    This is the check whose absence let the fixture drift. `questions.json` asked
+    about `invoke`, `pubsub` and `network` for a full round; the emitter produces
+    `invokes`, `subscribes-to`, `deploy-env`, `runs-as`, `in-dataset` and
+    `reads-from` and has never produced those three. The questions passed --
+    against a fixture vault that the same author wrote using the same wrong
+    names. A question keyed to a vocabulary nothing emits is the self-confirming
+    property in its purest form: the fixture makes the question true and the
+    question certifies the fixture, and no amount of green says anything about
+    the product.
+
+    Reconciled against the emitter SOURCE rather than a hand-maintained list,
+    because a hand-maintained list is another copy of the same name that can
+    drift the same way.
+    """
+    structural, literal = _emitter_edge_types()
+    vocabulary = structural | literal
+    assert vocabulary, "F20e: extracted no edge-type vocabulary from stitcher/ -- the " \
+                       "extraction is broken, which would make this check vacuously green"
+
+    ev = ROOT / "eval-harness"
+    used = {}
+    for qf in sorted(ev.glob("questions*.json")):
+        for q in _load_json(qf)["questions"]:
+            for block in ("expect", "expect_absent"):
+                exp = q.get(block)
+                if isinstance(exp, dict) and isinstance(exp.get("type"), str):
+                    used.setdefault(exp["type"], []).append("%s::%s" % (qf.name, q.get("id")))
+    assert used, "F20e: no question declares a `type` -- nothing is being reconciled"
+
+    unknown = {t: v for t, v in used.items() if t not in vocabulary}
+    assert not unknown, (
+        "F20e: question set(s) assert edge type(s) the stitcher never emits: %s\n"
+        "      emitter's structural vocabulary: %s\n"
+        "      A question keyed to a name nothing emits passes against the fixture and "
+        "measures nothing."
+        % ({t: v for t, v in sorted(unknown.items())}, sorted(structural)))
+
+
+def test_f20f_fixture_covers_every_physical_family_the_emitter_produces():
+    """The fixture vault must carry an edge of every physical family the emitter
+    produces IN THE PINNED SET, and the question set must ask about each.
+
+    F20e stops a question naming a type that does not exist. This is the other
+    direction: a family the emitter produces that NO question covers is a silent
+    hole -- the eval reports green while saying nothing about it. That is how
+    `in-dataset` (14 edges, the largest physical family on the 6-repo scope) and
+    `reads-from` (8) went unmeasured while the fixture asked about a `network`
+    type that does not exist.
+
+    The pinned set is the lead's decision of 2026-09-14 and is stated here as
+    data, not re-derived: the emitter's source carries fourteen distinct type
+    literals, of which these six fired on the measured scope. A family outside
+    the pinned set that the emitter can produce is reported by
+    test_f20g_unpinned_emitter_families_are_named rather than failed here.
+    """
+    pinned = {"invokes", "subscribes-to", "deploy-env", "runs-as", "in-dataset", "reads-from"}
+    ev = ROOT / "eval-harness"
+    fv_blob = "\n".join(
+        _safe_text(os.path.join(dp, fn)) or ""
+        for dp, dn, fns in os.walk(ev / "fixture-vault") for fn in fns)
+    missing_fixture = sorted(t for t in pinned if ("type: %s" % t) not in fv_blob)
+    assert not missing_fixture, (
+        "F20e/f: fixture-vault carries no edge of physical family/families %r, so no question "
+        "can measure them" % missing_fixture)
+
+    asked = set()
+    for q in _load_json(ev / "questions.json")["questions"]:
+        exp = q.get("expect")
+        if isinstance(exp, dict) and isinstance(exp.get("type"), str):
+            asked.add(exp["type"])
+    unasked = sorted(pinned - asked)
+    assert not unasked, (
+        "F20f: questions.json asks about no %r edge, so that family is served, fixtured and "
+        "unmeasured -- the eval is green while silent about it." % unasked)
+
+
+def test_f20g_unpinned_emitter_families_are_named():
+    """Report -- as a failure with a list, not silently -- any edge type the
+    emitter can construct that no bundled question asks about.
+
+    Not a demand that every type be covered: the pinned six are the ones that
+    fired on the measured scope, and the rest are real but unexercised. The
+    point is that the set of UNCOVERED families is written down in the suite
+    output rather than discovered a round later. The allowlist below is the
+    explicit record of what is knowingly unmeasured; adding a type to it is a
+    deliberate act, which is what makes it different from silence.
+    """
+    structural, _ = _emitter_edge_types()
+    ev = ROOT / "eval-harness"
+    asked = set()
+    for qf in ev.glob("questions*.json"):
+        for q in _load_json(qf)["questions"]:
+            for block in ("expect", "expect_absent"):
+                exp = q.get(block)
+                if isinstance(exp, dict) and isinstance(exp.get("type"), str):
+                    asked.add(exp["type"])
+    # Knowingly unmeasured: emitted by stitcher/infra.py or reconcile.py but not produced on
+    # the 6-repo scope the pinned vocabulary was measured against (lead decision 2026-09-14).
+    KNOWN_UNMEASURED = {
+        "publishes-to", "triggers", "dns-resolves-to", "domain-maps-to", "firewall-allows",
+        "fronted-by", "part-of-network", "reads-secret", "routes-to",
+    }
+    uncovered = sorted(structural - asked - KNOWN_UNMEASURED)
+    assert not uncovered, (
+        "F20g: the emitter can construct edge type(s) %r that no bundled question asks about "
+        "and that are not on the knowingly-unmeasured list. Either add a question or add them "
+        "to KNOWN_UNMEASURED with a reason -- an uncovered family must be written down, not "
+        "discovered next round." % uncovered)
+
+
+def test_f20h_suite_total_is_reconciled_not_transcribed():
+    """A published suite total must be the SUM of the per-file counts, and each
+    file's denominator must equal the tests it actually defines.
+
+    163/163 was published for a suite reporting 175. No suite was wrong; the
+    aggregate was counted by hand, one file grew, and nothing existed that could
+    notice. tests/run_all.py is now the single place a total comes from and
+    refuses to print one it cannot reconcile.
+
+    This tests run_all.reconcile() directly rather than running every suite
+    through it -- that would recurse into this file and cost the whole suite's
+    runtime for arithmetic. The three failure modes are exercised with
+    constructed rows, which is also what lets them be shown red without
+    breaking a real suite first.
+    """
+    runner = ROOT / "tests" / "run_all.py"
+    assert runner.is_file(), "F20h: tests/run_all.py missing -- no reconciled total exists"
+    src = _read_text(runner)
+    tree = ast.parse(src)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    stdlib = getattr(sys, "stdlib_module_names", None)
+    if stdlib is not None:
+        non_std = sorted(m for m in imported if m not in stdlib)
+        assert not non_std, "F20h: run_all.py imports non-stdlib module(s): %r" % non_std
+
+    sys.path.insert(0, str(ROOT / "tests"))
+    try:
+        import run_all
+    finally:
+        sys.path.pop(0)
+
+    ok_rows = [{"file": "a.py", "passed": 3, "total": 3, "registered": 3, "error": None},
+               {"file": "b.py", "passed": 4, "total": 4, "registered": 4, "error": None}]
+    assert run_all.reconcile(ok_rows, 7) == [], \
+        "F20h: a consistent itemization must reconcile cleanly"
+
+    # (1) the published bug: a total that is not the sum of its itemization.
+    stale = run_all.reconcile(ok_rows, 6)
+    assert stale and any("!= sum of per-file counts" in p for p in stale), \
+        "F20h: a total that is not the sum of the rows must be rejected; got %r" % stale
+
+    # (2) a suite that stops registering a test still reports "all passed".
+    shrunk = [dict(ok_rows[0]), {"file": "b.py", "passed": 3, "total": 3, "registered": 4,
+                                 "error": None}]
+    got = run_all.reconcile(shrunk, 6)
+    assert any("are defined and not being run" in p for p in got), \
+        "F20h: a denominator below the file's registered test count must be rejected; got %r" % got
+
+    # (3) an unparseable suite must be an error row, never dropped from the total.
+    broken = [dict(ok_rows[0]), {"file": "b.py", "passed": None, "total": None,
+                                 "registered": 4, "error": "printed no summary line"}]
+    got = run_all.reconcile(broken, 3)
+    assert any("b.py" in p for p in got), \
+        "F20h: a suite that cannot be counted must surface, not silently lower the total"
+
+    # And the real thing: every suite file this pack ships is discoverable by the runner.
+    shipped = {p.name for p in (ROOT / "tests").glob("test_*.py")}
+    assert len(shipped) >= 2, "F20h: expected several suite files, found %r" % sorted(shipped)
+
+
+def test_f20b_navigation_eval_red_on_known_bad_fixture():
+    """NEGATIVE CONTROL for F20 -- not a new contract criterion.
+
+    F20's green is only evidence if the same runner goes RED on a vault carrying
+    known defects. This runs eval-harness/questions.bad.json against
+    bad-fixture-vault (one off-vault edge target, one unresolved {template}
+    endpoint, one condition-less http-call, one stale provenance pointer, a
+    collection list with `roles` deleted, and a four-link chain against a
+    three-hop bar) and requires:
+
+      * a non-zero exit,
+      * EVERY question failing (0/N answered), and
+      * each question's failure note carrying the `note_contains` substring it
+        declares -- so the control asserts WHICH check tripped, not merely that
+        something failed. A control that only checks "it failed" can pass
+        without ever reaching the condition it targets.
+    """
+    fmg = _require_fmg()
+    runner = ROOT / "eval-harness" / "navigation-eval.py"
+    bad_q = ROOT / "eval-harness" / "questions.bad.json"
+    bad_v = ROOT / "eval-harness" / "bad-fixture-vault"
+    assert bad_q.is_file(), "F20b: eval-harness/questions.bad.json missing"
+    assert bad_v.is_dir(), "F20b: eval-harness/bad-fixture-vault/ missing"
+    spec = _load_json(bad_q)
+    qs = spec["questions"]
+    assert qs, "F20b: the known-bad question set is empty -- it would prove nothing"
+
+    try:
+        res = subprocess.run([sys.executable, str(runner), "--fmg", fmg,
+                              "--questions", str(bad_q)],
+                             cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("F20b: navigation-eval.py did not finish within 180s")
+    out = res.stdout + res.stderr
+    assert res.returncode != 0, (
+        "F20b: the eval reported SUCCESS on the known-bad fixture -- it cannot detect these "
+        "defects, so a green on questions.json means nothing:\n%s" % out
+    )
+    assert ("0/%d questions answered" % len(qs)) in out, (
+        "F20b: every known-bad question must fail (expected '0/%d questions answered'):\n%s"
+        % (len(qs), out)
+    )
+    unproven = []
+    for q in qs:
+        needle = q.get("note_contains")
+        assert needle, ("F20b: known-bad question %r declares no note_contains -- the control "
+                        "could then pass on a failure from an unrelated check" % q.get("id"))
+        if needle not in out:
+            unproven.append((q.get("id"), needle))
+    assert not unproven, (
+        "F20b: these known-bad questions failed for a reason other than the seeded defect they "
+        "target (expected substring absent from the output) -- the check they are meant to "
+        "exercise was never reached: %r\n%s" % (unproven, out)
+    )
 
 
 # =========================================================================== #

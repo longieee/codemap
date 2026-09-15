@@ -10,8 +10,21 @@ find_referencing_symbols (the guard lives in the dispatcher, not the call-site m
 
 Serena is run via `uvx --from serena-agent serena start-mcp-server --transport stdio`.
 """
-import json, subprocess, threading, time
+import json, subprocess, sys, threading, time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import freshness
+
+
+class OracleUnavailable(RuntimeError):
+    """The grounding oracle could not be started or did not complete its handshake.
+
+    Raised rather than returning empty facts, because an oracle that answers nothing and an oracle
+    that is not running are indistinguishable in the output — and the second one silently disables
+    the false-positive control the whole design leans on. Callers must treat this as fatal unless
+    the operator has explicitly opted out of grounding.
+    """
 
 
 class SerenaOracle:
@@ -28,11 +41,21 @@ class SerenaOracle:
         self._id = 0
 
     def __enter__(self):
-        self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        try:
+            self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        except (FileNotFoundError, OSError) as e:
+            raise OracleUnavailable(
+                f"cannot start the grounding oracle ({self.cmd[0]!r} not executable): {e}. "
+                f"Install it, or run with grounding explicitly disabled.") from e
         threading.Thread(target=self._reader, daemon=True).start()
-        self._rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
-                                 "clientInfo": {"name": "codemap", "version": "0"}}, timeout=120)
+        hello = self._rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                         "clientInfo": {"name": "codemap", "version": "0"}}, timeout=120)
+        # A handshake that timed out or errored means every later `resolves` would be False for the
+        # wrong reason — indistinguishable from genuine dead code. Fail here instead.
+        if not isinstance(hello, dict) or "result" not in hello:
+            raise OracleUnavailable(
+                f"grounding oracle did not complete the MCP handshake: {hello!r}")
         self._notify("notifications/initialized")
         time.sleep(1)
         return self
@@ -132,14 +155,47 @@ def ground_edges(project_path, edges):
     return facts
 
 
+GROUNDING_SCHEMA = 2   # 1 = bare {edge_id: facts}; 2 = {"_meta": {...}, "facts": {...}}
+
+
+def write_grounding(path, facts, project, ok=True, note=None):
+    """Write the grounding file in schema 2.
+
+    The `_meta.ok` flag is the load-bearing part: schema 1 was a bare fact map, in which "the
+    oracle ran and found nothing" and "the oracle never ran" serialize to the same empty object.
+    A consumer enforcing a grounding gate cannot tell those apart, so it cannot enforce anything.
+    """
+    doc = {"_meta": {"schema": GROUNDING_SCHEMA, "oracle": "serena", "project": str(project),
+                     "ok": bool(ok), "edges_grounded": len(facts),
+                     "at": freshness.now_iso(), "note": note},
+           "facts": facts}
+    Path(path).write_text(json.dumps(doc, indent=2))
+    return doc
+
+
+def read_grounding(path):
+    """Load a grounding file of either schema → (facts, meta). meta is None for schema 1."""
+    doc = json.loads(Path(path).read_text())
+    if isinstance(doc, dict) and "facts" in doc and "_meta" in doc:
+        return doc["facts"], doc["_meta"]
+    return doc, None
+
+
 if __name__ == "__main__":
-    import argparse, sys
+    import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
     ap.add_argument("--edges", required=True, help="candidates.json from derive.py")
     ap.add_argument("--out", default="grounding.json")
     a = ap.parse_args()
     edges = json.loads(Path(a.edges).read_text()).get("logical_edges", [])
-    facts = ground_edges(a.project, edges)
-    Path(a.out).write_text(json.dumps(facts, indent=2))
+    try:
+        facts = ground_edges(a.project, edges)
+    except OracleUnavailable as e:
+        # Exit non-zero AND record the failure, so a pipeline that ignores exit codes still cannot
+        # read this file as a successful grounding pass.
+        write_grounding(a.out, {}, a.project, ok=False, note=str(e))
+        print(f"grounding FAILED (oracle unavailable): {e}", file=sys.stderr)
+        sys.exit(2)
+    write_grounding(a.out, facts, a.project, ok=True)
     print(f"grounded {len(facts)} edges; wrote {a.out}", file=sys.stderr)

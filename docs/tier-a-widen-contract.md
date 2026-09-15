@@ -26,7 +26,16 @@ the point: only Tier-B live discovery finds them on the real deployment).
 `stitcher/infra.py` is run `python3 infra.py --config <codemap.toml> --out infra.json` and importable.
 It returns / writes `{"nodes": [...], "edges": [...]}`. Each **node** has at least `name`, `kind`,
 `provenance` (`<repo-rel-path>:<line>`); dimension attrs go in flat keys (reconcile normalizes them).
-Each **edge** has `from`, `to`, `type`, `provenance`. Comment-stripping keeps line numbers aligned so
+Each **edge** has `from`, `to`, `type`, `provenance`. *(Note added 2026-09-14: where this document
+says "invoke" or "pubsub" — as in the background above and the regression clause below — it names a
+**dimension**, not an edge type. No emitter produces a type called `invoke`, `pubsub` or `network`;
+the emitted types are `invokes`, `subscribes-to`/`publishes-to` and `part-of-network`/
+`firewall-allows`, and `network-vpc`/`network-subnet`/`network-connector` are node **kinds**. The
+normative vocabulary, with a verified `path:line` per type, is
+[logical-layer-contract.md](logical-layer-contract.md) §C14; the table below is consistent with it.)*
+A served edge carries considerably more than these four fields — 21 in total, including the
+`confidence`/`grounded` trust dimension; see `bin/README.md`. This contract governs what the **Tier A
+parser emits**, not what the store serves. Comment-stripping keeps line numbers aligned so
 `provenance` cites the resource's real definition line (existing `strip_comments`/`iter_hcl_blocks`
 behaviour — must be preserved).
 

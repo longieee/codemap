@@ -23,11 +23,18 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
 ## Terms
 
 - **Package root** = the `codemap/` directory (its own git repo). All paths below are relative to it.
-- **Shippable set** = every file tracked in the package **except** the git-ignored local instance
-  config. Concretely: the manifest(s), `skills/`, `stitcher/`, `init/`, `discovery/`, `eval-harness/`,
-  `config/*.example` + `config/.fmg.toml.tmpl`, `install.sh`, `bin/`, `manifests/`, and `docs/`.
-  It **excludes** `config/codemap.toml` (git-ignored, references real host paths), `.venv/`,
-  `.install-lock`, `__pycache__/`, `*.pyc`, and `.harness-memory/`.
+- **Shippable set** = **every file in the package tree**, minus a declared exclusion list. Defined
+  subtractively on purpose: an enumeration goes stale silently the moment a directory is added, and
+  a file missing from the enumeration would escape the client-boundary scan (criterion 22) without
+  anything failing. The exclusions are `config/codemap.toml` (git-ignored, references real host
+  paths), `.venv/`, `.install-lock`, `__pycache__/`, `*.pyc`, `node_modules/`, `.harness-memory/`,
+  `.git/`, `*.candidates.json`, and `deploy.sh`'s **destination-only stamps** (`PROVENANCE`,
+  `PACK_SOURCE` — present in a vendored copy, never in the canonical pack). Everything else ships,
+  including `docs/`, `tests/`, `tools/`, `fmg/`, `VERSION` and `deploy.sh`.
+  *(Amended 2026-09-14: this term used to enumerate the included directories, and the enumeration
+  had already fallen behind the tree — `fmg/`, `tools/`, `tests/`, `VERSION` and `deploy.sh` all
+  ship and none were listed. `tests/test_packaging.py::_iter_shippable_files` has always walked the
+  tree subtractively; the contract now says what the test does.)*
 - **Operational shippable set** = the shippable set **minus prose docs and self-referential
   checkers**: it EXCLUDES `docs/` (design prose that legitimately discusses paths and the security
   model), `tests/` (the test files themselves grep for these very tokens), the compiled binaries
@@ -72,9 +79,12 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
    or `.env` secrets file). Bundled skills are sanitized copies; instance secret access is out of
    the shareable package.
 10. **Config template is generic.** `config/codemap.toml.example` exists and contains none of the
-    real instance repo directory names (`aiconsole_scheduler_service`, `librechat`,
-    `mcp-user-context-info`, `helperai-data`, `common-agent-usage-monitor`,
-    `helperai-clean-up-conversation-job`). The real `config/codemap.toml` is **git-ignored**
+    real instance repo directory names. The forbidden set is **declared in code**, as
+    `INSTANCE_REPO_NAMES` in `tests/test_packaging.py`: pack content — this contract included —
+    must not enumerate a real instance's repo names (criterion 22), so the detector's own literals
+    are the single sanctioned place they appear, each on a line carrying a `boundary-allow` marker.
+    *(Amended 2026-09-13, canonical-pack promotion: the enumeration used to live in this paragraph
+    and shipped into every vendored copy.)* The real `config/codemap.toml` is **git-ignored**
     (present in `.gitignore`).
 
 ### D. Vendored binary + build fallback
@@ -115,12 +125,74 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
     with coarse `[[WikiLink]]` frontmatter edges + typed `cross_service:` runtime edges + a
     `.fmg.toml`). The runner uses only the Python standard library and locates `fmg` on `PATH` or
     at `bin/fmg-<platform-tag>`.
-19. `questions.json` contains **≥ 5** navigation questions, each with a `max_hops` of **≤ 3**.
+
+    *(Amended 2026-09-14 — this criterion described a one-vault, one-question-set harness and the
+    harness outgrew it. The three sets below are not three copies of the same check; each has a
+    **different required outcome**, and it is the second one that makes the first evidence rather
+    than decoration.)*
+
+    | question set | vault | required outcome | proved by |
+    |---|---|---|---|
+    | `questions.json` | `fixture-vault/` | **green** — every question answered, exit 0 | criterion 20 / `test_f20` |
+    | `questions.bad.json` | `bad-fixture-vault/` | **red** — 0 of N answered, exit 1, each failing for its declared `must_fail_because` cause | `test_f20b` (negative control) |
+    | `questions.store-surface.json` | `field-probe-vault/` | **blocked OR green, never silently scored** — exit 6 with `CAUSE: incapable-store` naming the dropped key, or exit 0 with every question answered | `test_f20c` (negative control) |
+
+    18.1 All three vaults MUST ship and MUST be self-contained (each carries its own `.fmg.toml`).
+    18.2 **`field-probe-vault/` is not a navigation fixture.** It exists so the runner can ask the
+    store *which record fields it serves*, by reading a vault that deliberately carries every field
+    any bundled question set reads. Its coverage is itself checked against the runner's own
+    `FIELD_TO_SERVED_KEY` table (`test_f20d`) rather than maintained by hand — a field missing from
+    the vault would otherwise be reported as dropped by the store, blocking a question set for the
+    wrong reason.
+    18.3 The pending-capability set is a **mechanism, not a fixed list**: it is repointed at whatever
+    the emitter writes and the store still drops, so it flips blocked → green with **no test edit**.
+    Two such flips were observed on 2026-09-14, both invisible to the store's version string *and*
+    to its subcommand list.
+    18.4 The vault directories deliberately carry **no `README.md`**: a README inside a vault becomes
+    a page in the graph the eval then queries. (Recorded in `eval-harness/README.md`.)
+
+19. `questions.json` contains **≥ 5** navigation questions, and **a question carries a `max_hops` if
+    and only if it makes a hop claim** — present and in `[1,3]` on a traversal question (`cmd` of
+    `bridge` or `query`), and **absent** on an `xedges` question. At least one traversal question
+    must survive in the set.
+
+    *(Amended 2026-09-14. The original read "each with a `max_hops` of ≤ 3", and requiring it
+    everywhere is what put the residue there: an `xedges` question is a single typed-record read with
+    no traversal to count, so a `max_hops` on one is a field that is declared and never read — and it
+    reads as a bar the question is being held to when it is not. The rule is asserted in **both**
+    directions, which is what stops it drifting back in; the runner enforces the same rule in
+    `navigation-eval.py::validate_spec` and rejects a non-conforming set with **exit 5**. The
+    "at least one traversal question survives" half is not decoration either: a set that quietly
+    lost all its `bridge`/`query` questions would still satisfy "≥ 5 questions, no bad `max_hops`"
+    while no longer measuring the hop bar at all.)*
+
+    19.1 **The ≤ 3-hop score is retired as a headline measurement and must not be restored as one.**
+    On a fixture of diameter 2 no question in the set could fail it, so it discriminated nothing. It
+    survives only as the per-question assertion above, on the questions that actually traverse.
+    Reporting it as a result is a documentation defect (`ARCHITECTURE.md` §9, M4).
 20. Running `python3 eval-harness/navigation-eval.py` (default target = the bundled fixture vault), when a
-    working `fmg` is available, **exits 0** and reports **every** question resolved within its
-    `max_hops` (≤ 3). Each question is answered by a served-map query (coarse `query`/`bridge` or
-    typed `xedges`), never by reading source. (This is the packaged, deterministic form of the
-    §9.4 "map answers an Appendix-A question in ≤ 3 hops" bar.)
+    working `fmg` is available, **exits 0** and reports **every** question answered — and every
+    question that carries a `max_hops` (criterion 19) resolved within it. Each question is answered
+    by a served-map query (coarse `query`/`bridge` or typed `xedges`), never by reading source.
+    (This is the packaged, deterministic form of the §9.4 "map answers an Appendix-A question from
+    the served map" bar.)
+
+    *(Amended 2026-09-14: the criterion previously required every question to resolve "within its
+    `max_hops` (≤ 3)", which presumed every question carries one. Under criterion 19 most do not,
+    and a criterion that reads a field the majority of questions must not declare cannot be held to.
+    The obligation is "answered"; the hop bound applies where a hop claim exists.)*
+
+    20.1 A `--questions FILE` run against a **non-default** set is governed by that set's required
+    outcome in the criterion-18 table, **not** by this criterion. Exit 0 is the required outcome for
+    exactly one of the three sets; asserting it for all three would make the negative controls
+    impossible to satisfy.
+    20.2 **The authority for a suite total is `tests/run_all.py`, not a figure written in a
+    document.** The runner reconciles each suite's passed count against the number of `test_*`
+    functions the file defines (`test_f20h`), so it cannot go stale; a number in prose can and does.
+    Totals of 163 and 175 each appeared in a document while correct and were stale within days.
+    A total quoted anywhere in the pack's documentation — including any quoted here — is therefore a
+    **dated observation, superseded by the next run**, and a reader who needs the current figure runs
+    the runner. Observed 2026-09-14: 202/202, 0 skipped, of which this contract's suite is 29 (191/191 before AIL-414 added 11 checks; see ARCHITECTURE.md §8.8 for the one suite that reported 8/9 on the first of those runs).
 
 ### G. Referential integrity
 21. Every intra-package path referenced by the manifest(s) and by `install.sh`'s dependency logic
@@ -133,11 +205,48 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
     manifest→`bin/fmg` reference: the runtime path is guaranteed to resolve at ship time, not only
     post-install.)*
 
+### H. Client boundary (pack content is deployed into consumer workspaces)
+> Scanned over the **whole shippable set** — wider than criteria 8–9 — because `docs/` and `tests/`
+> ship too, and a client name in prose is published just as surely as one in code. Text files only;
+> the compiled binaries under `bin/` are out of scope for a text scan (see the note below).
+
+22. **No client names in the shippable set.** No line of any text file in the shippable set
+    contains a client, service, repo, host or person name from the declared boundary token set
+    (`CLIENT_BOUNDARY_TOKENS` in `tests/test_packaging.py`, case-insensitive). Illustrative
+    examples keep their shape but use neutral stand-ins — the fixture vault's vocabulary
+    (`frontend`, `context-service`, `scheduler`, `cleanup-job`, `usage-monitor`, `example.com`) —
+    so a reader still learns what the example teaches. The **only** exemption is a line carrying
+    the literal marker `boundary-allow`, which exists for the detector's own pattern literals
+    (criterion 10) and is reviewable line by line; a marker is never file-wide.
+    *(Added 2026-09-13, canonical-pack promotion. Known scope limit, deliberately not papered
+    over: the check reads text files, so the vendored `bin/fmg-<platform-tag>` binary is not
+    scanned — it currently embeds the build machine's cargo-registry paths, which a rebuild with
+    `--remap-path-prefix` is expected to clear.)*
+
 ## CLI / invocation the tests may rely on
 
-- `python3 eval-harness/navigation-eval.py [--vault DIR] [--questions FILE]` — runs the eval; exits 0 iff
-  every question resolves within `max_hops`; prints a per-question table (question, hops, ≤max?,
-  pass/fail) to stdout; exits non-zero (with a message) if `fmg` cannot be located.
+- `python3 eval-harness/navigation-eval.py [--vault DIR] [--questions FILE] [--fmg PATH]` — runs the
+  eval; exits 0 iff every question is answered (and every question carrying a `max_hops` resolves
+  within it); prints a per-question table (question, hops, ≤max?, pass/fail) to stdout; exits
+  non-zero with a message rather than skipping when `fmg` cannot be located.
+
+  **Exit codes are a contract, and each names a different party at fault:**
+
+  | code | meaning |
+  |---|---|
+  | `0` | every question answered |
+  | `1` | at least one question failed on the served data |
+  | `3` | no `fmg` could be located |
+  | `4` | the located `fmg` is **missing a subcommand** the question set calls (`CAUSE: incapable-store`, subcommand form) |
+  | `5` | the question **spec** is invalid — including a `max_hops` that violates criterion 19 in either direction |
+  | `6` | the located `fmg` has every subcommand the set calls but does **not serve a record field** the questions read (`CAUSE: incapable-store`), or its served-field set could not be determined (`CAUSE: unknown-store-surface`) |
+
+  *(Exit 6 added 2026-09-14.)* **4 and 6 are deliberately distinct.** 4 is a missing subcommand; 6 is
+  a missing record field. Conflating them hides which of the store and the pipeline is at fault, and
+  makes one gate answer two questions — "did the pipeline emit it?" and "does the store serve it?" —
+  which is precisely the confusion the pending-capability set exists to prevent. Neither is reported
+  as a question failure: a question failure means the served data was wrong, not that the store could
+  not be asked.
 - `bash install.sh --check` — preflight; exits 0 iff every dependency is already satisfied, else
   non-zero after printing `FAIL` lines; performs no mutation and no network access.
 - Tests run with plain `python3` (no pytest dependency): expose `test_*()` functions AND a

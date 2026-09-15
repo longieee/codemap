@@ -5,10 +5,10 @@
   "version": "1.0.0",
   "description": "Builds and serves a navigation map of a multi-repo codebase — including the cross-service runtime edges (who calls whose endpoint, under what condition, at which call site) that no code-nav, telemetry, or wiki tool produces — over a prose wiki, served via MCP. Drops into any project via one install script.",
   "author": {
-    "name": "Long Nguyen"
+    "name": "Internal AI Lab"
   },
-  "homepage": "https://github.com/longieee/fmg",
-  "repository": "https://github.com/longieee/fmg",
+  "homepage": "https://github.com/example-org/fmg",
+  "repository": "https://github.com/example-org/fmg",
   "license": "MIT",
   "keywords": [
     "codebase",

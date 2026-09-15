@@ -33,9 +33,34 @@ cloud's SDK + auth weight. Python **ingests the CLIs' JSON**; it never reimpleme
 
 ## 2. Resource taxonomy — what to discover (provider-agnostic)
 
+> **This document is a design taxonomy, not the shipped type vocabulary. Do not quote an edge type
+> from here as a served type.** *(Note added 2026-09-14.)* The normative vocabulary — the complete
+> set of types an emitter actually produces, with an AST-verified `path:line` for each — is
+> [logical-layer-contract.md](logical-layer-contract.md) **§C14**, and `tests/test_logical_layer.py`
+> fails if the code and that table diverge. This document is the provider-agnostic *dimension*
+> checklist that Tier B/C implementation works from, so it deliberately names dimensions and
+> aspirational edges that no emitter produces yet. Three known divergences, so a reader is not
+> misled by either document:
+>
+> - **`invoke`, `pubsub` and `network` are not edge types anywhere.** Where this document uses them
+>   as shorthand below, it means the *dimension*. The emitted edges are `invokes`,
+>   `subscribes-to` / `publishes-to`, and `part-of-network` / `firewall-allows`;
+>   `network-vpc`, `network-subnet` and `network-connector` are node **kinds**, not edges.
+> - **`egress-via` (§2, §5) is not emitted.** The shipped networking edges are `part-of-network` and
+>   `firewall-allows`. It remains in this document as a design name for the dimension.
+> - **`in-dataset` and `reads-from` are emitted and served but appear in no dimension row below** —
+>   they come from the BigQuery/GCS parsing, and `in-dataset` is containment rather than coupling
+>   (logical-layer-contract §C15).
+>
+> Shipped counts: fifteen physical types in the vocabulary, 13 observed firing somewhere, **six on
+> the six-repo instance scope, of which `subscribes-to` serves zero edges until an environment is
+> named** — its home page resolves to an unevaluated IaC interpolation whose value lives in the
+> repo's `.tfvars`, so `--env <name>` resolves it and it then serves 2 of 2 (`ARCHITECTURE.md` §8.2,
+> contract C13.4).
+
 Each dimension yields canonical nodes and/or edges (§5). This is the full checklist; earlier passes
-covered only compute + invoke + pubsub + deploy-env — the rest (esp. **DNS / networking / domains /
-LB / certs**) were missing.
+covered only the compute, IAM-invoker, messaging and deploy-env dimensions — the rest (esp.
+**DNS / networking / domains / LB / certs**) were missing.
 
 | Dimension | Nodes | Edges the map gains |
 |---|---|---|
@@ -112,10 +137,18 @@ Kubernetes manifests (`Service`/`Ingress`/`Gateway`), `serverless.yml`, Helm cha
   "attrs": { "ingress": "...", "identity": "...", "url": "...", "image": "..." },
   "provenance": "iac:path:line  |  live:<cli-cmd>" }
 // edge
+// NOTE (2026-09-14): this `type` enum is the DESIGN taxonomy, not the served vocabulary.
+// The normative list of fifteen emitted physical types is logical-layer-contract.md §C14.
+// `egress-via` below is NOT emitted (the shipped networking edges are `part-of-network` and
+// `firewall-allows`); `in-dataset` IS emitted and is missing from this enum. Consume §C14.
 { "from": "...", "to": "...",
   "type": "invokes|egress-via|dns-resolves-to|fronted-by|routes-to|publishes-to|subscribes-to|reads-from|triggers|runs-as|deploy-env",
   "condition": "<enabling config/flag>", "source": "declared|live|both", "provenance": "..." }
 ```
+
+**`condition` on a physical edge is optional, like everywhere else in the map.** An IaC-declared
+relationship rarely has a statically discoverable guard, and an edge that carries none says so
+rather than asserting an unconditioned path (`ARCHITECTURE.md` §4.1, D4).
 
 These flow through `emit.py` as `cross_service:` frontmatter (physical edges) + service-inventory nodes,
 exactly like the logical layer — one uniform map.
@@ -157,7 +190,18 @@ touch the stitcher core, the store, or the map schema — only `discovery/`, `pr
     runs-as, service inventory (incl. no-source nodes), **DNS/domains, networking (VPC/subnet/
     connector/firewall/NAT), load-balancing (url-map/backend/forwarding/api-gateway), certs, static
     IPs, managed datastores (SQL/Redis/Spanner/Firestore + GCS/BigQuery), secret-refs (names only),
-    workflows/task-queues/eventarc**. Contract-tested (`tests/test_tier_a_widen.py`, 9/9).
+    workflows/task-queues/eventarc**. Contract-tested (`tests/test_tier_a_widen.py`, 9/9 in the
+    reconciled `tests/run_all.py` run of 2026-09-14). **Known flake, recorded rather than averaged
+    away:** this suite was observed at 8/9 and then 9/9 twice with no change to the tree, so a single
+    green run is not yet proof of a deterministic pass (`ARCHITECTURE.md` §8.8).
+  - **Emitted ≠ served, and served is per ENVIRONMENT.** Tier A emits 38 physical edges on the
+    six-repo scope and **35 land as served edges across 5 families** with no environment named;
+    `subscribes-to` serves zero until one is (`--env <name>` resolves its name from the repo's
+    `.tfvars`, then 2 of 2 — §8.2 of `ARCHITECTURE.md`, contract C13.4). `tools/stubs.py` is now
+    step 9/9 of `stitcher/run-pipeline.sh`, so traversable targets no longer need a second command;
+    3 of 208 remain dead ends because their target is an unevaluated reference the stub generator
+    refuses to page (§8.4). Do not read "Tier A done" as "the physical layer is fully served", and
+    do not quote a physical-edge number without the environment it was rendered for.
   - **Tier B** (`discovery/gcp/cr-topology.sh`) — read-only `gcloud … --format=json` discovery across
     all §4 dimensions; fails closed without auth; secret VALUES never read. Built; **not yet live-run**
     (needs an operator with cloud auth).
@@ -174,4 +218,4 @@ touch the stitcher core, the store, or the map schema — only `discovery/`, `pr
   (Tier A widen, Tier B script, Tier C join incl. `from_live`, emit-wire) is built and validated
   headless; only the live snapshot needs cloud auth.
 - **Later (codemap-m6):** AWS + Azure providers per §7.
-- Track as build items under `codemap` (see `helperai-llm-wiki/feature_list.json`).
+- Track as build items under `codemap` (see `<wiki-vault>/feature_list.json` in the instance workspace).

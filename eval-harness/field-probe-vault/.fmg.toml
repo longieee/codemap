@@ -1,0 +1,14 @@
+# fmg config for the codemap navigation-eval fixture vault.
+# Coarse structural edges (depends_on / part_of / related_to) build the traversable graph;
+# the runtime layer (cross_service:) is served separately via `xedges`.
+[resolve]
+title_field = "title"
+alias_field = "aliases"
+fallback    = "filename_stem"
+
+[fields.direction]
+related_to = "bidirectional"
+
+[display]
+default_depth = 1
+max_depth     = 10

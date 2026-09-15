@@ -20,7 +20,12 @@ CHECK_ONLY=0; [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
 # --- pinned versions / refs (supply-chain: AGENTS §2a — no unpinned launchers) ---
 FMG_REF="${FMG_REF:-master}"                       # fmg git ref for the cargo source-build fallback
-FMG_GIT="${FMG_GIT:-https://github.com/longieee/fmg}"
+# The fmg SOURCE REPO is instance config, not pack content: this pack is vendored into consumer
+# workspaces, so it must not carry a vendor/personal repo URL (client-boundary rule — see
+# docs/packaging-contract.md criterion 22). Resolved at the point of use, in this order:
+#   $FMG_GIT  →  `fmg_git = "..."` in config/codemap.toml  →  unset, and the source-build
+# fallback then REFUSES with an instruction instead of cloning a guessed repo.
+FMG_GIT="${FMG_GIT:-}"                             # see config/codemap.toml.example → fmg_git
 SERENA_VER="${SERENA_VER:-1.6.1}"                  # pinned Serena release
 SERENA_PKG="serena-agent==${SERENA_VER}"
 PYRIGHT_VER="${PYRIGHT_VER:-1.1.401}"
@@ -60,6 +65,11 @@ install_fmg(){
     mkdir -p "$PREFIX"; cp "$VENDORED" "$PREFIX/fmg"; chmod +x "$PREFIX/fmg"
     ok "fmg installed from vendored binary ($PLATFORM) → bin/fmg + $PREFIX/fmg"
   elif have cargo; then
+    FMG_GIT="${FMG_GIT:-$(codemap_cfg fmg_git '')}"
+    if [ -z "$FMG_GIT" ]; then
+      bad "no vendored binary for $PLATFORM and no fmg source repo configured — set FMG_GIT=<fmg git url> or add fmg_git to config/codemap.toml (see config/codemap.toml.example), then re-run"
+      return
+    fi
     say "no vendored binary for $PLATFORM — building fmg from source ($FMG_GIT @ $FMG_REF) …"
     if cargo install --git "$FMG_GIT" --branch "$FMG_REF" --root "${PREFIX%/bin}" fmg; then
       rm -f "$NEUTRAL"; cp "$PREFIX/fmg" "$NEUTRAL" 2>/dev/null || true; chmod +x "$NEUTRAL" 2>/dev/null || true

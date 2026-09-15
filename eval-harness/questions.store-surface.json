@@ -1,0 +1,19 @@
+{
+  "description": "PENDING-CAPABILITY set: questions reading a field the pipeline emits and the serving binary does not pass through. The set is REPOINTED as the store catches up — it is a mechanism, not a fixed list. Today it reads `bidirectional`, which stitcher/emit.py::datastore_obj writes and the store drops. Run against the vendored fmg it exits 6 with `CAUSE: incapable-store` naming the missing key; it does NOT report a question failure, because 'the store dropped the field' and 'the pipeline did not emit it' are two different findings and one gate must not answer both. tests/test_packaging.py::test_f20c asserts the three-valued outcome (blocked | green | never silently scored), so a flip needs no test edit. HISTORY, both observed on 2026-09-14 and both invisible to the version string and the subcommand list: a 08:41 rebuild started serving confidence/grounded/endpoint_expr/unresolved_exprs, and a 09:15 rebuild started serving role/schedule/via/value/source. Both sets of questions graduated into questions.json; test_f20c went blocked -> green without being edited.",
+  "label": "store-surface",
+  "vault": "field-probe-vault",
+  "questions": [
+    {
+      "id": "S1",
+      "topic": "datastore coupling direction: is the Probe Source's shared-store coupling declared two-way?",
+      "cmd": "xedges",
+      "node": "Probe Source",
+      "expect": {
+        "target": "Probe Store",
+        "type": "shares-datastore",
+        "store": "mongo",
+        "bidirectional": true
+      }
+    }
+  ]
+}

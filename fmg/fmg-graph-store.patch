@@ -1,0 +1,1111 @@
+diff --git a/src/config.rs b/src/config.rs
+index f4bb5dc..7cd0c24 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -12,6 +12,31 @@ pub struct Config {
+     pub fields: FieldsConfig,
+     #[serde(default)]
+     pub display: DisplayConfig,
++    #[serde(default)]
++    pub scan: ScanConfig,
++}
++
++/// Which paths the vault scan skips. A vault's own machinery (`_harness/`, `_schema/`,
++/// `_skills/`) is not content, and parsing it as content pollutes every derived
++/// number — orphans most visibly.
++#[derive(Debug, Deserialize)]
++pub struct ScanConfig {
++    /// Glob patterns matched against every path component. Only `*` and `?` are
++    /// metacharacters.
++    #[serde(default = "default_exclude")]
++    pub exclude: Vec<String>,
++}
++
++impl Default for ScanConfig {
++    fn default() -> Self {
++        Self {
++            exclude: default_exclude(),
++        }
++    }
++}
++
++fn default_exclude() -> Vec<String> {
++    vec!["_*".to_string(), ".*".to_string()]
+ }
+ 
+ #[derive(Debug, Deserialize)]
+diff --git a/src/graph.rs b/src/graph.rs
+index 27cc887..401973d 100644
+--- a/src/graph.rs
++++ b/src/graph.rs
+@@ -6,7 +6,7 @@ use serde::Serialize;
+ 
+ use crate::config::Config;
+ use crate::resolve::Resolver;
+-use crate::vault::Page;
++use crate::vault::{AccessSpec, ExtractedFrom, Page};
+ 
+ /// A node in the vault graph.
+ #[derive(Debug, Clone, Serialize)]
+@@ -45,10 +45,91 @@ pub struct RuntimeEdge {
+     pub condition: Option<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub provenance: Option<String>,
++    /// Page owning the shared schema — one of the two facts that decide blast radius.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub owner: Option<String>,
++    /// Datastore engine or logical store name.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub store: Option<String>,
++    /// Shared collections/tables, in page order.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub collections: Option<Vec<String>>,
++    /// Read/write intent from each end — the other blast-radius fact.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub access: Option<AccessSpec>,
++    /// Which end of an `invoke` this page is (`caller`/`callee`).
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub role: Option<String>,
++    /// Cron or schedule expression driving an `invoke`.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub schedule: Option<String>,
++    /// Mechanism the edge runs through: scheduler, `pubsub` topic, VPC connector.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub via: Option<String>,
++    /// Carried value: the env var on `deploy-env`, the identity on `runs-as`.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub value: Option<String>,
++    /// `declared` (IaC) | `live` (observed) | `both`.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub source: Option<String>,
++    /// Freshness stamp of the derived record (`{repo, sha, at}`), passed through verbatim.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub extracted_from: Option<ExtractedFrom>,
++    /// Extraction confidence of the weakest contributing call site.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub confidence: Option<String>,
++    /// Whether a grounding oracle confirmed the call site resolves.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub grounded: Option<bool>,
++    /// The endpoint expression that stayed a variable.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub endpoint_expr: Option<String>,
++    /// The call expressions whose target could not be resolved statically.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub unresolved_exprs: Option<Vec<String>>,
+     /// True when the target has no backing page (external service/infra node).
+     pub external_target: bool,
+ }
+ 
++/// The `type` value the extractor writes for a call site whose target could not be
++/// resolved statically. One authoritative marker, so edge CLASS is decided by one rule.
++pub const DYNAMIC_TYPE: &str = "dynamic";
++
++impl RuntimeEdge {
++    /// A `dynamic` edge is an UNRESOLVED-TARGET candidate, not a graded one.
++    ///
++    /// The class is decided solely by `type == "dynamic"` — the marker the extractor
++    /// writes from its own `kind`. `confidence` is a separate axis (an `http-call` edge
++    /// can also be `low`), so folding it into this predicate would make one question
++    /// into two and a legitimate low-confidence resolved edge would be misfiled.
++    pub fn is_dynamic(&self) -> bool {
++        self.edge_type == DYNAMIC_TYPE
++    }
++}
++
++/// Which class of runtime edge to serve.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub enum EdgeClass {
++    /// Everything. The default: `dynamic` candidates exist BECAUSE dropping them was a
++    /// silent recall hole, so hiding them by default would reintroduce it.
++    #[default]
++    All,
++    /// Exclude `dynamic` — the high-trust map.
++    Resolved,
++    /// Only `dynamic` — the unresolved-target worklist.
++    Dynamic,
++}
++
++impl EdgeClass {
++    pub fn keeps(&self, e: &RuntimeEdge) -> bool {
++        match self {
++            EdgeClass::All => true,
++            EdgeClass::Resolved => !e.is_dynamic(),
++            EdgeClass::Dynamic => e.is_dynamic(),
++        }
++    }
++}
++
+ /// The complete vault graph.
+ pub struct VaultGraph {
+     pub graph: DiGraph<VaultNode, VaultEdge>,
+@@ -223,6 +304,20 @@ impl VaultGraph {
+                     endpoint: ce.endpoint,
+                     condition: ce.condition,
+                     provenance: ce.provenance,
++                    owner: ce.owner,
++                    store: ce.store,
++                    collections: ce.collections,
++                    access: ce.access,
++                    role: ce.role,
++                    schedule: ce.schedule,
++                    via: ce.via,
++                    value: ce.value,
++                    source: ce.source,
++                    extracted_from: ce.extracted_from,
++                    confidence: ce.confidence,
++                    grounded: ce.grounded,
++                    endpoint_expr: ce.endpoint_expr,
++                    unresolved_exprs: ce.unresolved_exprs,
+                     external_target: resolved.is_none(),
+                 });
+             }
+@@ -252,6 +347,21 @@ impl VaultGraph {
+         }
+     }
+ 
++    /// Runtime-layer edges touching `title` (or ALL), restricted to one edge class.
++    ///
++    /// Order is inherited from `runtime_edges_for`, which walks pages in sorted path
++    /// order, so filtering cannot reorder the output.
++    pub fn runtime_edges_classified(
++        &self,
++        title: Option<&str>,
++        class: EdgeClass,
++    ) -> Vec<&RuntimeEdge> {
++        self.runtime_edges_for(title)
++            .into_iter()
++            .filter(|e| class.keeps(e))
++            .collect()
++    }
++
+     /// Look up a node by title (case-insensitive).
+     pub fn find_node(&self, title: &str) -> Option<NodeIndex> {
+         self.title_index.get(&title.to_lowercase()).copied()
+@@ -297,3 +407,68 @@ impl VaultGraph {
+         &self.graph[idx]
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn edge(kind: &str, conf: Option<&str>) -> RuntimeEdge {
++        RuntimeEdge {
++            from: "A".into(),
++            to: "B".into(),
++            edge_type: kind.into(),
++            endpoint: None,
++            condition: None,
++            provenance: None,
++            owner: None,
++            store: None,
++            collections: None,
++            access: None,
++            role: None,
++            schedule: None,
++            via: None,
++            value: None,
++            source: None,
++            extracted_from: None,
++            confidence: conf.map(|s| s.to_string()),
++            grounded: None,
++            endpoint_expr: None,
++            unresolved_exprs: None,
++            external_target: false,
++        }
++    }
++
++    #[test]
++    fn test_class_is_decided_by_type_only() {
++        let dyn_e = edge("dynamic", Some("low"));
++        let http_low = edge("http-call", Some("low"));
++        let http_high = edge("http-call", Some("high"));
++        assert!(dyn_e.is_dynamic());
++        // A LOW-confidence http-call is NOT a dynamic candidate: confidence is a separate
++        // axis, and folding it into the class would misfile a resolved-but-weak edge.
++        assert!(!http_low.is_dynamic());
++        assert!(!http_high.is_dynamic());
++    }
++
++    #[test]
++    fn test_edge_class_partitions_the_set() {
++        let edges = vec![
++            edge("dynamic", Some("low")),
++            edge("http-call", Some("low")),
++            edge("shares-datastore", None),
++        ];
++        let keep = |c: EdgeClass| edges.iter().filter(|e| c.keeps(e)).count();
++        assert_eq!(keep(EdgeClass::All), 3);
++        assert_eq!(keep(EdgeClass::Dynamic), 1);
++        assert_eq!(keep(EdgeClass::Resolved), 2);
++        // resolved + dynamic must exactly partition all -- no edge counted twice or lost
++        assert_eq!(keep(EdgeClass::Resolved) + keep(EdgeClass::Dynamic), keep(EdgeClass::All));
++    }
++
++    #[test]
++    fn test_default_class_is_all() {
++        // Hiding dynamic candidates by default would reintroduce the silent recall hole
++        // they exist to expose.
++        assert_eq!(EdgeClass::default(), EdgeClass::All);
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 628d401..0270055 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -4,7 +4,7 @@ use std::process;
+ use clap::{Parser, Subcommand, ValueEnum};
+ 
+ use fmg::config::Config;
+-use fmg::graph::VaultGraph;
++use fmg::graph::{EdgeClass, VaultGraph};
+ use fmg::mcp;
+ use petgraph::graph::NodeIndex;
+ use fmg::output::{self, Format};
+@@ -49,6 +49,24 @@ impl From<FormatArg> for Format {
+     }
+ }
+ 
++/// Which class of runtime edge `xedges` lists.
++#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
++enum ClassArg {
++    All,
++    Resolved,
++    Dynamic,
++}
++
++impl From<ClassArg> for EdgeClass {
++    fn from(arg: ClassArg) -> Self {
++        match arg {
++            ClassArg::All => EdgeClass::All,
++            ClassArg::Resolved => EdgeClass::Resolved,
++            ClassArg::Dynamic => EdgeClass::Dynamic,
++        }
++    }
++}
++
+ #[derive(Subcommand)]
+ enum Commands {
+     /// Vault statistics: fields, types, node counts, health
+@@ -108,6 +126,11 @@ enum Commands {
+         /// Only edges touching this node (as source or target); default: all
+         #[arg(long)]
+         from: Option<String>,
++
++        /// Which edge class to list: all (default), resolved (exclude `dynamic`
++        /// unresolved-target candidates), or dynamic (only those — the recall worklist)
++        #[arg(long = "class", default_value = "all")]
++        class: ClassArg,
+     },
+ 
+     /// Start an MCP server over stdio (for Claude Desktop / agent pipelines)
+@@ -166,7 +189,7 @@ fn main() {
+     }
+ 
+     let config = Config::load(&vault_root);
+-    let pages = vault::scan_vault(&vault_root);
++    let pages = vault::scan_vault(&vault_root, &config.scan.exclude);
+ 
+     if pages.is_empty() {
+         eprintln!("No markdown files found in '{}'", vault_root.display());
+@@ -236,8 +259,8 @@ fn main() {
+             print!("{}", output::format_query(&vg, &result, format));
+         }
+ 
+-        Commands::Xedges { from } => {
+-            let edges = vg.runtime_edges_for(from.as_deref());
++        Commands::Xedges { from, class } => {
++            let edges = vg.runtime_edges_classified(from.as_deref(), class.into());
+             print!("{}", output::format_xedges(&edges, format));
+         }
+ 
+diff --git a/src/mcp.rs b/src/mcp.rs
+index 0c53b71..fe91af6 100644
+--- a/src/mcp.rs
++++ b/src/mcp.rs
+@@ -15,7 +15,7 @@ use std::path::PathBuf;
+ use serde_json::{json, Value};
+ 
+ use crate::config::Config;
+-use crate::graph::VaultGraph;
++use crate::graph::{EdgeClass, VaultGraph};
+ use crate::output::{self, Format};
+ use crate::query::{self, TraversalDirection};
+ use crate::vault;
+@@ -173,7 +173,7 @@ fn tool_list() -> Value {
+         },
+         {
+             "name": "cross_service",
+-            "description": "List typed cross-service (runtime) edges with type, endpoint, enabling condition, and code/config provenance. Optionally filter to edges touching a node.",
++            "description": "List typed cross-service (runtime) edges with type, endpoint, enabling condition and code/config provenance, plus the full shared-datastore record: store, collections, access (read/write intent per end), owner (schema owner), and extracted_from ({repo, sha, at} freshness of the derived record). Use access and owner to judge blast radius on a shares-datastore edge — a reader and a writer are not interchangeable. IMPORTANT — not every edge is equally trustworthy: an edge of type 'dynamic' is a call site whose TARGET could not be resolved statically, so it records that an outbound call exists at that provenance line, NOT where it goes. Such edges carry confidence (of the weakest contributing site), grounded, and unresolved_exprs (the call expression to grep for), and must not be read as grounded, endpoint-resolved edges. Use class='resolved' for a high-trust map, class='dynamic' for the unresolved-target worklist. PHYSICAL edges (invoke, pubsub, deploy-env, runs-as, network) additionally carry role (which end of an invoke this is), schedule (the cron driving it), via (the scheduler, pubsub topic or VPC connector it runs through), value (the env var on deploy-env, the identity on runs-as), and source ('declared' from IaC, 'live' observed, or 'both'). Those are what make a physical edge actionable: runs-as without role/value does not say which service account, deploy-env without value/source does not say what the value was or where it came from, and pubsub without via does not name the topic. Optionally filter to edges touching a node.",
+             "inputSchema": {
+                 "type": "object",
+                 "properties": {
+@@ -181,6 +181,12 @@ fn tool_list() -> Value {
+                         "type": "string",
+                         "description": "Only edges touching this node (as source or target); default: all"
+                     },
++                    "class": {
++                        "type": "string",
++                        "enum": ["all", "resolved", "dynamic"],
++                        "description": "Edge class: 'all' (default — dynamic candidates included, because omitting them is a silent recall hole), 'resolved' (exclude type='dynamic'), 'dynamic' (only those)",
++                        "default": "all"
++                    },
+                     "format": {
+                         "type": "string",
+                         "enum": ["text", "json"],
+@@ -309,7 +315,23 @@ fn call_tool(vg: &VaultGraph, config: &Config, name: &str, args: &Value) -> (Str
+         "cross_service" => {
+             let from = args["node"].as_str();
+             let fmt = parse_format(args, Format::Json);
+-            let edges = vg.runtime_edges_for(from);
++            // An unrecognised class is an ERROR, not a silent fall back to `all`: a caller
++            // that asked for the high-trust map and quietly received dynamic candidates
++            // would draw exactly the wrong conclusion.
++            let class = match args["class"].as_str() {
++                None | Some("all") => EdgeClass::All,
++                Some("resolved") => EdgeClass::Resolved,
++                Some("dynamic") => EdgeClass::Dynamic,
++                Some(other) => {
++                    return (
++                        format!(
++                            r#"{{"error": "unknown class '{other}'; expected all, resolved or dynamic"}}"#
++                        ),
++                        true,
++                    );
++                }
++            };
++            let edges = vg.runtime_edges_classified(from, class);
+             (output::format_xedges(&edges, fmt), false)
+         }
+ 
+@@ -367,7 +389,7 @@ fn write_error(id: &Value, code: i64, message: &str) {
+ 
+ pub fn run(vault_root: PathBuf) {
+     let config = Config::load(&vault_root);
+-    let pages = vault::scan_vault(&vault_root);
++    let pages = vault::scan_vault(&vault_root, &config.scan.exclude);
+     let vg = VaultGraph::build(&pages, &config, false);
+ 
+     let stdin = io::stdin().lock();
+diff --git a/src/output.rs b/src/output.rs
+index 20da6d3..16c6618 100644
+--- a/src/output.rs
++++ b/src/output.rs
+@@ -225,14 +225,36 @@ pub fn format_xedges(edges: &[&crate::graph::RuntimeEdge], format: Format) -> St
+         Format::Json => serde_json::to_string_pretty(&edges).unwrap(),
+         _ => {
+             let mut out = String::new();
++            let n_dyn = edges.iter().filter(|e| e.is_dynamic()).count();
+             out.push_str("═══════════════════════════════════════\n");
+-            out.push_str(&format!("  Cross-service (runtime) edges: {}\n", edges.len()));
++            // The dynamic count is annotated ONLY when there is at least one, so a vault
++            // with no unresolved-target candidates keeps byte-identical output and no
++            // "0 dynamic" noise. When they exist, the split is visible without reading
++            // every edge — an unresolved-target candidate must not be countable only by
++            // scrolling.
++            if n_dyn > 0 {
++                out.push_str(&format!(
++                    "  Cross-service (runtime) edges: {} ({} dynamic / {} resolved)\n",
++                    edges.len(),
++                    n_dyn,
++                    edges.len() - n_dyn
++                ));
++            } else {
++                out.push_str(&format!("  Cross-service (runtime) edges: {}\n", edges.len()));
++            }
+             out.push_str("═══════════════════════════════════════\n\n");
+             for e in edges {
+                 let ext = if e.external_target { "  ⚠ external" } else { "" };
++                // A dynamic edge is marked on its own arrow line: a consumer scanning the
++                // text must not have to infer trust from a field three lines down.
++                let dynmark = if e.is_dynamic() {
++                    "  ⚠ DYNAMIC (target not statically resolved)"
++                } else {
++                    ""
++                };
+                 out.push_str(&format!(
+-                    "  {} ──[{}]──▶ {}{}\n",
+-                    e.from, e.edge_type, e.to, ext
++                    "  {} ──[{}]──▶ {}{}{}\n",
++                    e.from, e.edge_type, e.to, dynmark, ext
+                 ));
+                 if let Some(ep) = &e.endpoint {
+                     out.push_str(&format!("      endpoint:   {ep}\n"));
+@@ -241,9 +263,73 @@ pub fn format_xedges(edges: &[&crate::graph::RuntimeEdge], format: Format) -> St
+                     "      condition:  {}\n",
+                     e.condition.as_deref().unwrap_or("(unconditional)")
+                 ));
++                // Physical-layer attributes: what runs this edge, on what schedule, as
++                // whom, and whether it was declared in IaC or observed live. Without
++                // these a physical edge names a relationship but nothing actionable
++                // about it. Fixed order, never sorted at render time.
++                if let Some(r) = &e.role {
++                    out.push_str(&format!("      role:       {r}\n"));
++                }
++                if let Some(s) = &e.schedule {
++                    out.push_str(&format!("      schedule:   {s}\n"));
++                }
++                if let Some(v) = &e.via {
++                    out.push_str(&format!("      via:        {v}\n"));
++                }
++                if let Some(v) = &e.value {
++                    out.push_str(&format!("      value:      {v}\n"));
++                }
++                if let Some(s) = &e.source {
++                    out.push_str(&format!("      source:     {s}\n"));
++                }
++                // Shared-datastore attributes: store, which collections, who may write,
++                // and who owns the schema. Emitted in a fixed order, never sorted at
++                // render time, so the text output stays deterministic.
++                if let Some(s) = &e.store {
++                    out.push_str(&format!("      store:      {s}\n"));
++                }
++                if let Some(c) = &e.collections {
++                    out.push_str(&format!("      collections: {}\n", c.join(", ")));
++                }
++                if let Some(a) = &e.access {
++                    let side = |v: &Option<Vec<String>>| match v {
++                        Some(x) if !x.is_empty() => x.join("+"),
++                        _ => "(unstated)".to_string(),
++                    };
++                    out.push_str(&format!(
++                        "      access:     this={} target={}\n",
++                        side(&a.this_side),
++                        side(&a.target)
++                    ));
++                }
++                if let Some(o) = &e.owner {
++                    out.push_str(&format!("      owner:      {o}\n"));
++                }
++                // Trust attributes, before provenance: they qualify everything above them.
++                if let Some(c) = &e.confidence {
++                    out.push_str(&format!("      confidence: {c}\n"));
++                }
++                if let Some(g) = e.grounded {
++                    out.push_str(&format!(
++                        "      grounded:   {}\n",
++                        if g { "yes" } else { "no" }
++                    ));
++                }
++                if let Some(ex) = &e.endpoint_expr {
++                    out.push_str(&format!("      endpoint_expr: {ex}\n"));
++                }
++                if let Some(u) = &e.unresolved_exprs {
++                    out.push_str(&format!("      unresolved: {}\n", u.join(" | ")));
++                }
+                 if let Some(p) = &e.provenance {
+                     out.push_str(&format!("      provenance: {p}\n"));
+                 }
++                if let Some(x) = &e.extracted_from {
++                    out.push_str(&format!(
++                        "      extracted_from: repo={} sha={} at={}\n",
++                        x.repo, x.sha, x.at
++                    ));
++                }
+             }
+             out
+         }
+diff --git a/src/vault.rs b/src/vault.rs
+index d4ffab1..f76bb52 100644
+--- a/src/vault.rs
++++ b/src/vault.rs
+@@ -1,12 +1,44 @@
++use serde::Serialize;
+ use serde_yaml::Value;
+ use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
+ use walkdir::WalkDir;
+ 
++/// Read/write intent on a shared datastore, from each end of the edge.
++///
++/// This is the field that decides blast radius on a `shares-datastore` edge: an agent
++/// cannot tell a reader from a writer without it.
++#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
++pub struct AccessSpec {
++    /// Access exercised by the page carrying the edge.
++    #[serde(rename = "this", skip_serializing_if = "Option::is_none")]
++    pub this_side: Option<Vec<String>>,
++    /// Access exercised by the edge target.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub target: Option<Vec<String>>,
++}
++
++/// Freshness stamp for a derived record — the extraction-contract shape:
++/// `extracted_from: {repo, sha, at}`.
++///
++/// `repo` is the logical repo name, `sha` a git sha or the literal `unknown`,
++/// `at` an ISO8601 UTC timestamp. The store passes it through verbatim; it does not
++/// synthesise or validate it, so a stale or wrong stamp is visible rather than hidden.
++#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
++pub struct ExtractedFrom {
++    pub repo: String,
++    pub sha: String,
++    pub at: String,
++}
++
+ /// A typed cross-service (runtime) edge parsed from a `cross_service:` frontmatter field.
+ ///
+ /// Carries per-edge attributes a `[[WikiLink]]` array cannot: type, endpoint, enabling
+ /// condition (the §9.2 disabled-path-as-live guard), and code/config provenance.
++///
++/// The shared-datastore attributes (`owner`, `store`, `collections`, `access`) are
++/// what make the flagship coupling question answerable at the served surface instead
++/// of only in the file, so they are parsed here and projected all the way out.
+ #[derive(Debug, Clone)]
+ pub struct CrossEdge {
+     pub target: String,
+@@ -14,6 +46,42 @@ pub struct CrossEdge {
+     pub endpoint: Option<String>,
+     pub condition: Option<String>,
+     pub provenance: Option<String>,
++    /// Page that owns the shared schema (bare title; `[[...]]` brackets stripped).
++    pub owner: Option<String>,
++    /// Datastore engine or logical store name (e.g. `mongo`).
++    pub store: Option<String>,
++    /// Shared collections/tables, in the order written on the page.
++    pub collections: Option<Vec<String>>,
++    /// Read/write intent from each end.
++    pub access: Option<AccessSpec>,
++    /// Which end of an `invoke` this page is (`caller`/`callee`).
++    pub role: Option<String>,
++    /// Cron or schedule expression driving an `invoke`.
++    pub schedule: Option<String>,
++    /// The mechanism the edge runs through — scheduler, topic, VPC connector.
++    /// On a `pubsub` edge this is the topic; without it the edge names no queue.
++    pub via: Option<String>,
++    /// The carried value: the env var on `deploy-env`, the identity on `runs-as`.
++    pub value: Option<String>,
++    /// Where the physical edge was established: `declared` (IaC), `live` (observed), or
++    /// `both`. Distinguishes intent from reality, which is the whole point of the
++    /// physical layer.
++    pub source: Option<String>,
++    /// Freshness stamp, per-edge or inherited from the page.
++    pub extracted_from: Option<ExtractedFrom>,
++    /// Extraction confidence for the WEAKEST contributing call site (`low`/`med`/`high`).
++    /// On a `dynamic` edge this is what stops a low-confidence candidate reading like a
++    /// grounded one.
++    pub confidence: Option<String>,
++    /// Whether a grounding oracle confirmed the call site resolves.
++    pub grounded: Option<bool>,
++    /// The endpoint expression that stayed a variable, when the endpoint did not resolve.
++    pub endpoint_expr: Option<String>,
++    /// The call expressions whose TARGET could not be resolved statically — the reason a
++    /// `dynamic` edge exists, and the string a reader greps for. Accepted as a list
++    /// (`unresolved_exprs`, the aggregated shape) or as a single scalar
++    /// (`unresolved_expr`); normalised to a list either way.
++    pub unresolved_exprs: Option<Vec<String>>,
+ }
+ 
+ /// A parsed markdown page from the vault.
+@@ -96,18 +164,93 @@ impl Page {
+             if target.is_empty() {
+                 continue;
+             }
++            let get_list = |k: &str| {
++                m.get(k).and_then(|v| v.as_sequence()).map(|seq| {
++                    seq.iter()
++                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
++                        .collect::<Vec<String>>()
++                })
++            };
++            let access = m.get("access").and_then(|v| match v {
++                Value::Mapping(am) => {
++                    let side = |k: &str| {
++                        am.get(k).and_then(|v| v.as_sequence()).map(|seq| {
++                            seq.iter()
++                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
++                                .collect::<Vec<String>>()
++                        })
++                    };
++                    let spec = AccessSpec {
++                        this_side: side("this"),
++                        target: side("target"),
++                    };
++                    // An `access:` key present but carrying neither side is no information;
++                    // omit it rather than serving an empty object.
++                    if spec.this_side.is_none() && spec.target.is_none() {
++                        None
++                    } else {
++                        Some(spec)
++                    }
++                }
++                _ => None,
++            });
++            // Per-edge stamp wins; otherwise inherit the page-level one. Both shapes are
++            // accepted so the store does not constrain where extraction writes it.
++            let extracted_from = parse_extracted_from(m.get("extracted_from"))
++                .or_else(|| parse_extracted_from(self.frontmatter.get("extracted_from")));
+             out.push(CrossEdge {
+                 target,
+                 edge_type: get("type").unwrap_or_else(|| "cross_service".to_string()),
+                 endpoint: get("endpoint"),
+                 condition: get("condition"),
+                 provenance: get("provenance"),
++                owner: get("owner").map(|s| strip_wikilink(&s)),
++                store: get("store"),
++                collections: get_list("collections"),
++                access,
++                role: get("role"),
++                schedule: get("schedule"),
++                via: get("via"),
++                value: get("value"),
++                source: get("source"),
++                extracted_from,
++                confidence: get("confidence"),
++                grounded: m.get("grounded").and_then(|v| v.as_bool()),
++                endpoint_expr: get("endpoint_expr"),
++                // List form first (what the extractor aggregates to), scalar accepted.
++                unresolved_exprs: get_list("unresolved_exprs")
++                    .or_else(|| get("unresolved_expr").map(|s| vec![s]))
++                    .filter(|v| !v.is_empty()),
+             });
+         }
+         out
+     }
+ }
+ 
++/// Strip `[[...]]` wikilink brackets so an owner names the same string the graph
++/// indexes nodes by — the same normalisation already applied to `target`.
++fn strip_wikilink(s: &str) -> String {
++    s.trim()
++        .trim_start_matches("[[")
++        .trim_end_matches("]]")
++        .trim()
++        .to_string()
++}
++
++/// Parse an `extracted_from: {repo, sha, at}` mapping. All three keys are required —
++/// a partial stamp is not a freshness claim, so it is dropped rather than half-served.
++fn parse_extracted_from(v: Option<&Value>) -> Option<ExtractedFrom> {
++    let Some(Value::Mapping(m)) = v else {
++        return None;
++    };
++    let get = |k: &str| m.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
++    Some(ExtractedFrom {
++        repo: get("repo")?,
++        sha: get("sha")?,
++        at: get("at")?,
++    })
++}
++
+ /// Extract `[[WikiLink]]` targets from a YAML value.
+ /// Handles strings, arrays of strings, and nested structures.
+ fn extract_wikilinks_from_value(value: &Value) -> Vec<String> {
+@@ -138,8 +281,93 @@ fn extract_wikilinks_from_str(s: &str) -> Vec<String> {
+     links
+ }
+ 
++/// Compile `[scan] exclude` glob patterns into anchored regexes matched per path component.
++///
++/// Glob surface: `*`, `?`, `[seq]` and `[!seq]` — deliberately the same surface as Python's
++/// `fnmatch`, because the serving-side lint reads the same `[scan] exclude` key with
++/// `fnmatch` and the two must grade the same page set. Everything else is literal, and an
++/// unterminated `[` is a literal `[` (as `fnmatch` also treats it).
++/// An unparseable pattern is reported and skipped rather than silently widening the scan.
++pub fn compile_excludes(patterns: &[String]) -> Vec<regex::Regex> {
++    let mut out = Vec::new();
++    for p in patterns {
++        let mut re = String::from("^");
++        let chars: Vec<char> = p.chars().collect();
++        let mut i = 0;
++        while i < chars.len() {
++            match chars[i] {
++                '*' => {
++                    re.push_str(".*");
++                    i += 1;
++                }
++                '?' => {
++                    re.push('.');
++                    i += 1;
++                }
++                '[' => {
++                    // Find the closing bracket; a `]` immediately after `[` or `[!` is a literal.
++                    let mut j = i + 1;
++                    if j < chars.len() && (chars[j] == '!' || chars[j] == '^') {
++                        j += 1;
++                    }
++                    if j < chars.len() && chars[j] == ']' {
++                        j += 1;
++                    }
++                    while j < chars.len() && chars[j] != ']' {
++                        j += 1;
++                    }
++                    if j >= chars.len() {
++                        // Unterminated class: literal '['.
++                        re.push_str(&regex::escape("["));
++                        i += 1;
++                        continue;
++                    }
++                    let inner: String = chars[i + 1..j].iter().collect();
++                    let inner = if let Some(rest) = inner.strip_prefix('!') {
++                        format!("^{rest}")
++                    } else {
++                        inner
++                    };
++                    // `\` and `]` inside the class must not terminate or escape it.
++                    let inner = inner.replace('\\', "\\\\");
++                    re.push('[');
++                    re.push_str(&inner);
++                    re.push(']');
++                    i = j + 1;
++                }
++                c => {
++                    re.push_str(&regex::escape(&c.to_string()));
++                    i += 1;
++                }
++            }
++        }
++        re.push('$');
++        match regex::Regex::new(&re) {
++            Ok(r) => out.push(r),
++            Err(e) => eprintln!("Warning: ignoring invalid [scan] exclude pattern {p:?}: {e}"),
++        }
++    }
++    out
++}
++
++/// True when any component of `rel` matches an exclude pattern — so `_harness/*`
++/// is excluded by `_*` matching the directory component, and `_index.md` by the
++/// filename component.
++fn is_excluded(rel: &Path, excludes: &[regex::Regex]) -> bool {
++    rel.components().any(|c| {
++        c.as_os_str()
++            .to_str()
++            .is_some_and(|s| excludes.iter().any(|r| r.is_match(s)))
++    })
++}
++
+ /// Discover and parse all markdown files in a vault directory.
+-pub fn scan_vault(vault_root: &Path) -> Vec<Page> {
++///
++/// `exclude` holds `[scan] exclude` glob patterns (default `["_*", ".*"]`), matched
++/// against every path component. This is what keeps a vault's own machinery —
++/// `_harness/`, `_schema/`, `_skills/` template pages — out of the content graph.
++pub fn scan_vault(vault_root: &Path, exclude: &[String]) -> Vec<Page> {
++    let excludes = compile_excludes(exclude);
+     let mut pages = Vec::new();
+     for entry in WalkDir::new(vault_root)
+         .follow_links(true)
+@@ -154,13 +382,8 @@ pub fn scan_vault(vault_root: &Path) -> Vec<Page> {
+         if ext != Some("md") {
+             continue;
+         }
+-        // Skip hidden directories (e.g., .obsidian, .trash)
+         let rel = path.strip_prefix(vault_root).unwrap_or(path);
+-        if rel.components().any(|c| {
+-            c.as_os_str()
+-                .to_str()
+-                .is_some_and(|s| s.starts_with('.'))
+-        }) {
++        if is_excluded(rel, &excludes) {
+             continue;
+         }
+ 
+@@ -258,6 +481,304 @@ mod tests {
+         assert!(fm.is_empty());
+     }
+ 
++    /// A `shares-datastore` edge as the write door actually writes it.
++    const SHARES_PAGE: &str = r#"---
++title: Scheduler
++cross_service:
++- target: '[[Frontend]]'
++  type: shares-datastore
++  store: mongo
++  endpoint: mongo:roles,users
++  collections:
++  - roles
++  - users
++  access:
++    this:
++    - read
++    - write
++    target:
++    - write
++  owner: '[[Frontend]]'
++  provenance: scheduler/scripts/seed.py:17
++  extracted_from:
++    repo: scheduler
++    sha: abc1234
++    at: '2026-09-13T00:00:00Z'
++---
++body"#;
++
++    fn page_from(content: &str) -> Page {
++        let (frontmatter, body) = parse_frontmatter_and_body(content);
++        Page {
++            rel_path: PathBuf::from("services/scheduler.md"),
++            stem: "scheduler".to_string(),
++            frontmatter,
++            body,
++        }
++    }
++
++    #[test]
++    fn test_cross_edge_carries_full_datastore_record() {
++        let edges = page_from(SHARES_PAGE).cross_service_edges();
++        assert_eq!(edges.len(), 1);
++        let e = &edges[0];
++        assert_eq!(e.store.as_deref(), Some("mongo"));
++        assert_eq!(
++            e.collections.as_deref(),
++            Some(["roles".to_string(), "users".to_string()].as_slice())
++        );
++        // owner is normalised to the bare title the graph indexes by.
++        assert_eq!(e.owner.as_deref(), Some("Frontend"));
++        let a = e.access.as_ref().expect("access parsed");
++        assert_eq!(
++            a.this_side.as_deref(),
++            Some(["read".to_string(), "write".to_string()].as_slice())
++        );
++        assert_eq!(a.target.as_deref(), Some(["write".to_string()].as_slice()));
++        let x = e.extracted_from.as_ref().expect("extracted_from parsed");
++        assert_eq!((x.repo.as_str(), x.sha.as_str()), ("scheduler", "abc1234"));
++    }
++
++    #[test]
++    fn test_cross_edge_absent_datastore_fields_are_none() {
++        // The known-bad-adjacent case: an http-call edge has none of these fields, and
++        // must not acquire empty ones (which would serve a key that means nothing).
++        let p = page_from(
++            "---\ntitle: A\ncross_service:\n- target: '[[B]]'\n  type: http-call\n  endpoint: /x\n---\n",
++        );
++        let e = &p.cross_service_edges()[0];
++        assert!(e.store.is_none() && e.collections.is_none());
++        assert!(e.access.is_none() && e.owner.is_none() && e.extracted_from.is_none());
++    }
++
++    #[test]
++    fn test_extracted_from_inherited_from_page_level() {
++        let p = page_from(
++            "---\ntitle: A\nextracted_from:\n  repo: r1\n  sha: deadbee\n  at: '2026-01-01T00:00:00Z'\ncross_service:\n- target: '[[B]]'\n  type: http-call\n---\n",
++        );
++        let x = p.cross_service_edges()[0]
++            .extracted_from
++            .clone()
++            .expect("page-level stamp inherited");
++        assert_eq!((x.repo.as_str(), x.sha.as_str()), ("r1", "deadbee"));
++    }
++
++    #[test]
++    fn test_extracted_from_partial_is_dropped_not_half_served() {
++        let p = page_from(
++            "---\ntitle: A\ncross_service:\n- target: '[[B]]'\n  type: http-call\n  extracted_from:\n    repo: r1\n---\n",
++        );
++        assert!(p.cross_service_edges()[0].extracted_from.is_none());
++    }
++
++    /// A `dynamic` candidate as the extractor emits it (emit.py `logical_obj`).
++    const DYNAMIC_PAGE: &str = r#"---
++title: Context Service
++cross_service:
++- target: '[[(dynamic)]]'
++  type: dynamic
++  endpoint: (var)
++  provenance: context_service/src/client.py:88
++  confidence: low
++  endpoint_expr: url
++  unresolved_exprs:
++  - self.client.post(url)
++  - requests.get(base + path)
++  grounded: false
++- target: '[[Frontend]]'
++  type: http-call
++  endpoint: /api/agents/chat
++  provenance: context_service/src/chat.py:12
++  confidence: high
++  grounded: true
++---
++body"#;
++
++    #[test]
++    fn test_dynamic_edge_carries_its_trust_fields() {
++        let edges = page_from(DYNAMIC_PAGE).cross_service_edges();
++        assert_eq!(edges.len(), 2);
++        let d = &edges[0];
++        assert_eq!(d.edge_type, "dynamic");
++        assert_eq!(d.confidence.as_deref(), Some("low"));
++        assert_eq!(d.grounded, Some(false));
++        assert_eq!(d.endpoint_expr.as_deref(), Some("url"));
++        assert_eq!(
++            d.unresolved_exprs.as_deref(),
++            Some(
++                [
++                    "self.client.post(url)".to_string(),
++                    "requests.get(base + path)".to_string()
++                ]
++                .as_slice()
++            )
++        );
++        // grounded: true must not be conflated with "absent"
++        assert_eq!(edges[1].grounded, Some(true));
++        assert_eq!(edges[1].confidence.as_deref(), Some("high"));
++        assert!(edges[1].unresolved_exprs.is_none());
++    }
++
++    #[test]
++    fn test_unresolved_expr_scalar_form_accepted() {
++        let p = page_from(
++            "---\ntitle: A\ncross_service:\n- target: '[[(dynamic)]]'\n  type: dynamic\n  unresolved_expr: fetch(u)\n---\n",
++        );
++        assert_eq!(
++            p.cross_service_edges()[0].unresolved_exprs.as_deref(),
++            Some(["fetch(u)".to_string()].as_slice())
++        );
++    }
++
++    #[test]
++    fn test_grounded_absent_is_none_not_false() {
++        // "the page does not say" and "the oracle said no" are different findings; an
++        // edge with no `grounded:` key must not be served as grounded=false.
++        let p = page_from("---\ntitle: A\ncross_service:\n- target: '[[B]]'\n  type: http-call\n---\n");
++        assert!(p.cross_service_edges()[0].grounded.is_none());
++        assert!(p.cross_service_edges()[0].confidence.is_none());
++    }
++
++    /// Physical edges exactly as `emit.py::physical_obj` writes them (the shape carried by
++    /// the eval harness's field-probe vault).
++    const PHYSICAL_PAGE: &str = r#"---
++title: Probe Source
++cross_service:
++- target: "[[Probe Target]]"
++  type: invoke
++  role: caller
++  schedule: "*/5 * * * *"
++  via: cloud-scheduler
++  source: both
++  provenance: probe-repo/terraform/main.tf:10
++- target: "[[Probe Queue]]"
++  type: pubsub
++  via: topic-probe
++  source: declared
++  provenance: probe-repo/terraform/pubsub.tf:3
++- target: "[[Probe Env]]"
++  type: deploy-env
++  value: PROBE_URL
++  source: live
++  provenance: probe-repo/terraform/env.tf:7
++- target: "[[Probe Identity]]"
++  type: runs-as
++  value: probe-runner@example.invalid
++  source: declared
++  provenance: probe-repo/terraform/iam.tf:12
++- target: "[[Probe Net]]"
++  type: network
++  via: connector-probe
++  source: live
++  provenance: probe-repo/terraform/net.tf:20
++---
++body"#;
++
++    #[test]
++    fn test_physical_edges_carry_their_attributes() {
++        let e = page_from(PHYSICAL_PAGE).cross_service_edges();
++        assert_eq!(e.len(), 5);
++
++        // invoke: on what schedule, through what, which end are we, declared or observed
++        assert_eq!(e[0].edge_type, "invoke");
++        assert_eq!(e[0].role.as_deref(), Some("caller"));
++        assert_eq!(e[0].schedule.as_deref(), Some("*/5 * * * *"));
++        assert_eq!(e[0].via.as_deref(), Some("cloud-scheduler"));
++        assert_eq!(e[0].source.as_deref(), Some("both"));
++
++        // pubsub: `via` NAMES THE TOPIC — without it the edge names no queue
++        assert_eq!(e[1].edge_type, "pubsub");
++        assert_eq!(e[1].via.as_deref(), Some("topic-probe"));
++        assert_eq!(e[1].source.as_deref(), Some("declared"));
++
++        // deploy-env: which variable carries it, and where that was established
++        assert_eq!(e[2].edge_type, "deploy-env");
++        assert_eq!(e[2].value.as_deref(), Some("PROBE_URL"));
++        assert_eq!(e[2].source.as_deref(), Some("live"));
++
++        // runs-as: WHICH identity — the fact the edge exists for
++        assert_eq!(e[3].edge_type, "runs-as");
++        assert_eq!(e[3].value.as_deref(), Some("probe-runner@example.invalid"));
++
++        // network: the connector
++        assert_eq!(e[4].edge_type, "network");
++        assert_eq!(e[4].via.as_deref(), Some("connector-probe"));
++    }
++
++    #[test]
++    fn test_physical_attributes_absent_stay_absent() {
++        // `pubsub` has no role/schedule/value. Serving those as empty strings would make
++        // "no schedule" indistinguishable from "scheduled to the empty string".
++        let e = page_from(PHYSICAL_PAGE).cross_service_edges();
++        assert!(e[1].role.is_none() && e[1].schedule.is_none() && e[1].value.is_none());
++        assert!(e[2].role.is_none() && e[2].via.is_none());
++        // and a logical edge carries none of them at all
++        let l = page_from("---\ntitle: A\ncross_service:\n- target: '[[B]]'\n  type: http-call\n---\n");
++        let l = &l.cross_service_edges()[0];
++        assert!(l.role.is_none() && l.schedule.is_none() && l.via.is_none()
++                && l.value.is_none() && l.source.is_none());
++    }
++
++    #[test]
++    fn test_exclude_matches_any_component() {
++        let ex = compile_excludes(&["_*".to_string(), ".*".to_string()]);
++        assert!(is_excluded(Path::new("_harness/AGENTS.md"), &ex));
++        assert!(is_excluded(Path::new("_skills/x/templates/_schema/api.md"), &ex));
++        assert!(is_excluded(Path::new(".obsidian/workspace.md"), &ex));
++        assert!(is_excluded(Path::new("services/_draft.md"), &ex));
++        assert!(!is_excluded(Path::new("services/frontend.md"), &ex));
++        assert!(!is_excluded(Path::new("data-stores/mongo_db.md"), &ex));
++    }
++
++    #[test]
++    fn test_exclude_supports_character_classes_like_fnmatch() {
++        // The serving-side lint reads the same `[scan] exclude` key with fnmatch. If the
++        // store's glob surface is narrower, a bracket pattern makes the two grade
++        // different page sets — measured on the live vault as 111 pages vs 80.
++        let ex = compile_excludes(&["[_.]*".to_string()]);
++        assert!(is_excluded(Path::new("_harness/AGENTS.md"), &ex));
++        assert!(is_excluded(Path::new(".obsidian/x.md"), &ex));
++        assert!(!is_excluded(Path::new("services/frontend.md"), &ex));
++
++        // Negated class. Expectations taken from fnmatch itself, not guessed: because
++        // ANY component may match, `[!_]*` excludes `_harness/AGENTS.md` too — the
++        // `AGENTS.md` component does not start with `_`.
++        let neg = compile_excludes(&["[!_]*".to_string()]);
++        assert!(is_excluded(Path::new("_harness/AGENTS.md"), &neg));
++        assert!(is_excluded(Path::new("services/frontend.md"), &neg));
++        // ...but a path whose every component starts with `_` is not excluded by it.
++        assert!(!is_excluded(Path::new("_harness/_x"), &neg));
++
++        // A `]` immediately after `[` is a literal class member.
++        let lit_close = compile_excludes(&["[]_]*".to_string()]);
++        assert!(is_excluded(Path::new("_harness/AGENTS.md"), &lit_close));
++        assert!(!is_excluded(Path::new(".obsidian/x.md"), &lit_close));
++
++        // Ranges.
++        let rng = compile_excludes(&["_h[a-z]*".to_string()]);
++        assert!(is_excluded(Path::new("_harness/AGENTS.md"), &rng));
++        assert!(!is_excluded(Path::new("_skills/x.md"), &rng));
++
++        // An unterminated class is a literal '[', not a widened match.
++        let lit = compile_excludes(&["[abc".to_string()]);
++        assert!(is_excluded(Path::new("[abc/x.md"), &lit));
++        assert!(!is_excluded(Path::new("services/frontend.md"), &lit));
++    }
++
++    #[test]
++    fn test_exclude_empty_list_excludes_nothing() {
++        let ex = compile_excludes(&[]);
++        assert!(!is_excluded(Path::new("_harness/AGENTS.md"), &ex));
++    }
++
++    #[test]
++    fn test_exclude_is_literal_outside_glob_metachars() {
++        // `.` must not behave as a regex wildcard: `.*` excludes dotfiles, not everything.
++        let ex = compile_excludes(&[".*".to_string()]);
++        assert!(!is_excluded(Path::new("services/frontend.md"), &ex));
++        assert!(is_excluded(Path::new(".trash/x.md"), &ex));
++    }
++
+     #[test]
+     fn test_parse_frontmatter_wikilinks() {
+         let content = r#"---

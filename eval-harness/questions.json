@@ -1,5 +1,6 @@
 {
-  "description": "Navigation-eval questions for codemap. Each is answered by a served-map query (coarse query/bridge or typed xedges) — never by reading source — and must resolve within max_hops (<= 3), the packaged form of the ARCHITECTURE §6.4 / Appendix-A '<= 3 graph hops' product bar.",
+  "description": "Navigation-eval questions for codemap. Each is answered by a served-map query (coarse query/bridge or typed xedges) — never by reading source. Two measurements, reported separately: a bridge/query question is a TRAVERSAL measured against its max_hops (<= 3, the ARCHITECTURE §6.4 / Appendix-A bar); an xedges question is a TARGET-RESOLVABILITY check — a SINGLE served edge must satisfy every field declared under `expect`, so three declared facts cannot be satisfied by three different edges. Only traversal questions carry `max_hops`: an xedges lookup is one record read with no hops to count, and the runner REJECTS the field there rather than ignoring it. A question may also carry `expect_absent` — an edge description that must match NOTHING — which is how 'distinguishable from a resolved edge' becomes failable rather than a presence check. Type names are the ones stitcher/infra.py and derive.py actually emit — invokes, subscribes-to, deploy-env, runs-as, in-dataset, reads-from, http-call, data-store, shares-datastore, mcp-fanout, dynamic — and test_f20e reconciles every type used here against the emitter source, because a question keyed to a name nothing emits passes for no reason. Fields are read from the served record only; the runner probes eval-harness/field-probe-vault/ first and aborts with a named cause if the store does not pass a declared field through.",
+  "label": "fixture",
   "vault": "fixture-vault",
   "questions": [
     {
@@ -7,32 +8,63 @@
       "topic": "http-call: what endpoint does the Context Service call on the Frontend, and under what condition?",
       "cmd": "xedges",
       "node": "Context Service",
-      "expect": ["Frontend", "http-call", "/api/agents/chat", "resumable_flow_flag"],
-      "max_hops": 3
+      "expect": {
+        "target": "Frontend",
+        "type": "http-call",
+        "endpoint": "/api/agents/chat",
+        "condition": "resumable_flow_flag",
+        "provenance": "context-service/src/helper_service.py:411",
+        "endpoint_resolved": true,
+        "external_target": false
+      }
     },
     {
       "id": "Q2",
       "topic": "data-store: how does the Frontend use Redis, and what is the risk condition?",
       "cmd": "xedges",
       "node": "Frontend",
-      "expect": ["Redis", "data-store", "REDIS_ENABLE_OFFLINE_QUEUE"],
-      "max_hops": 3
+      "expect": {
+        "target": "Redis",
+        "type": "data-store",
+        "endpoint": "(tcp; ioredis)",
+        "condition": "REDIS_ENABLE_OFFLINE_QUEUE",
+        "condition_present": true,
+        "external_target": false
+      }
     },
     {
       "id": "Q3",
       "topic": "shares-datastore: which job is coupled to the Frontend's conversation store with no direct call?",
       "cmd": "xedges",
       "node": "Cleanup Job",
-      "expect": ["Frontend", "shares-datastore", "conversations"],
-      "max_hops": 3
+      "expect": {
+        "target": "Frontend",
+        "type": "shares-datastore",
+        "endpoint": [
+          "conversations",
+          "messages"
+        ],
+        "provenance": "cleanup-job/main.py:107",
+        "endpoint_resolved": true,
+        "external_target": false
+      }
     },
     {
       "id": "Q4",
       "topic": "shares-datastore: how is the Scheduler coupled to the Frontend (RBAC collections)?",
       "cmd": "xedges",
       "node": "Scheduler",
-      "expect": ["Frontend", "shares-datastore", "roles"],
-      "max_hops": 3
+      "expect": {
+        "target": "Frontend",
+        "type": "shares-datastore",
+        "endpoint": [
+          "roles",
+          "users"
+        ],
+        "provenance": "scheduler/scripts/seed_roles.py:17",
+        "endpoint_resolved": true,
+        "external_target": false
+      }
     },
     {
       "id": "Q5",
@@ -40,7 +72,9 @@
       "cmd": "bridge",
       "from": "Context Service",
       "to": "Redis",
-      "expect": ["Frontend"],
+      "expect": [
+        "Frontend"
+      ],
       "max_hops": 3
     },
     {
@@ -49,8 +83,225 @@
       "cmd": "query",
       "node": "Frontend",
       "direction": "up",
-      "expect": ["MongoDB", "Redis"],
+      "expect": [
+        "MongoDB",
+        "Redis"
+      ],
       "max_hops": 3
+    },
+    {
+      "id": "Q7",
+      "topic": "dynamic: is the Report Gateway's unresolved-target call DISTINGUISHABLE from a resolved one, by saying what it could not resolve?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Unresolved Target",
+        "type": "dynamic",
+        "endpoint_resolved": false,
+        "external_target": false,
+        "provenance": "report-gateway/src/client.py:140",
+        "extracted_from_complete": true,
+        "confidence": "low",
+        "unresolved_expr_present": true
+      },
+      "expect_absent": {
+        "type": "dynamic",
+        "unresolved_expr_present": false
+      }
+    },
+    {
+      "id": "Q8",
+      "topic": "dynamic vs resolved: the Report Gateway's statically resolved call is NOT typed dynamic",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Frontend",
+        "type": "http-call",
+        "endpoint": "/api/reports/run",
+        "condition": "reports_enabled",
+        "endpoint_resolved": true,
+        "condition_present": true,
+        "extracted_from_complete": true,
+        "confidence": "high",
+        "unresolved_expr_present": false
+      },
+      "expect_absent": {
+        "target": "Frontend",
+        "type": "dynamic"
+      }
+    },
+    {
+      "id": "Q9",
+      "topic": "physical invokes: what triggers the Scheduler, and from which declaration?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Scheduler",
+        "type": "invokes",
+        "external_target": false,
+        "provenance": "report-gateway/terraform/main.tf:22",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q10",
+      "topic": "physical subscribes-to: which topic does the Report Gateway subscribe to?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Report Queue",
+        "type": "subscribes-to",
+        "external_target": false,
+        "provenance": "report-gateway/terraform/pubsub.tf:5",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q11",
+      "topic": "physical deploy-env: which service's URL is injected into the Report Gateway's environment?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Frontend",
+        "type": "deploy-env",
+        "external_target": false,
+        "provenance": "report-gateway/terraform/env.tf:9",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q12",
+      "topic": "physical runs-as: which identity does the Report Gateway run as?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Report Runner",
+        "type": "runs-as",
+        "external_target": false,
+        "provenance": "report-gateway/terraform/iam.tf:14",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q13",
+      "topic": "physical in-dataset: which dataset holds the Report Gateway's table?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Report Dataset",
+        "type": "in-dataset",
+        "external_target": false,
+        "provenance": "report-gateway/terraform/bq.tf:18",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q14",
+      "topic": "dead-end target -> caller: who calls the Unresolved Target? (answerable only because a stub page exists)",
+      "cmd": "bridge",
+      "from": "Unresolved Target",
+      "to": "Report Gateway",
+      "expect": [
+        "Report Gateway"
+      ],
+      "max_hops": 3
+    },
+    {
+      "id": "Q15",
+      "topic": "co-writer lookup: which collections does the Cleanup Job write in the Frontend's store, and who owns them?",
+      "cmd": "xedges",
+      "node": "Cleanup Job",
+      "expect": {
+        "target": "Frontend",
+        "type": "shares-datastore",
+        "store": "mongo",
+        "collections": [
+          "conversations",
+          "messages"
+        ],
+        "access_this": [
+          "r",
+          "w"
+        ],
+        "access_target": [
+          "r",
+          "w"
+        ],
+        "owner": "Frontend",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q16",
+      "topic": "dynamic quality: no dynamic edge may claim the confidence of a resolved one",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Unresolved Target",
+        "type": "dynamic",
+        "confidence": "low"
+      },
+      "expect_absent": {
+        "type": "dynamic",
+        "confidence_in": [
+          "med",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "Q17",
+      "topic": "physical reads-from: which bucket does the Report Gateway's table read from?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Report Bucket",
+        "type": "reads-from",
+        "external_target": false,
+        "provenance": "report-gateway/terraform/bq.tf:27",
+        "extracted_from_complete": true
+      }
+    },
+    {
+      "id": "Q18",
+      "topic": "physical invokes attributes: on what schedule, through what, and is it declared or observed live?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Scheduler",
+        "type": "invokes",
+        "role": "caller",
+        "schedule": "*/10 * * * *",
+        "via": "cloud-scheduler",
+        "source": "both"
+      }
+    },
+    {
+      "id": "Q19",
+      "topic": "physical deploy-env attribute: which environment variable carries the target's URL?",
+      "cmd": "xedges",
+      "node": "Report Gateway",
+      "expect": {
+        "target": "Frontend",
+        "type": "deploy-env",
+        "value": "FRONTEND_URL",
+        "source": "live"
+      }
+    },
+    {
+      "id": "Q20",
+      "topic": "mcp-fanout: which downstream MCP server does the Frontend dispatch tool calls to, and from which registry entry?",
+      "cmd": "xedges",
+      "node": "Frontend",
+      "expect": {
+        "target": "Monitoring MCP Server",
+        "type": "mcp-fanout",
+        "endpoint": "/mcp/tools/call",
+        "endpoint_resolved": true,
+        "external_target": false,
+        "provenance": "config/service-registry.yaml:12",
+        "extracted_from_complete": true
+      }
     }
   ]
 }

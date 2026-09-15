@@ -7,9 +7,10 @@ The logical layer (derive.py) sees HTTP/RPC calls; the physical layer (infra.py)
 database: repo A WRITES collection C and repo B READS C, so A and B are coupled through C even though
 neither ever calls the other. This module derives that edge type.
 
-Motivating case: `common-agent-usage-monitor` (reads the LibreChat Mongo collections into BigQuery) and
-`helperai-clean-up-conversation-job` (prunes those same collections) have no HTTP surface between them —
-they are tied to `librechat` (the writer/owner) and to each other purely through shared collections
+Motivating case (names generalised; a real instance names its own repos in config/codemap.toml):
+`usage-monitor` (reads the frontend's Mongo collections into BigQuery) and `cleanup-job` (prunes those
+same collections) have no HTTP surface between them — they are tied to `frontend` (the writer/owner)
+and to each other purely through shared collections
 (e.g. cleanup WRITES `pendingdeletedconversations`, the monitor READS it).
 
 Access is DERIVED from code/IaC, config-driven, no collection names hardcoded:
@@ -25,6 +26,9 @@ on the reader/dependent repo's page (per-neighbour, subsystem grain, carrying th
 import argparse, ast, json, re, sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import freshness
 
 try:
     import tomllib
@@ -130,7 +134,7 @@ def _pluralize(word):
 
 
 def scan_mongoose(repo_rel, workspace):
-    """librechat-style ownership: mongoose.model[<generic>]('Name', …) → collection = pluralize(name), WRITE."""
+    """Mongoose-style ownership (JS/TS): mongoose.model[<generic>]('Name', …) → collection = pluralize(name), WRITE."""
     access = []
     rp = workspace / repo_rel
     pat = re.compile(r"mongoose\.model(?:<[^>]*>)?\(\s*['\"]([A-Za-z][A-Za-z0-9]*)['\"]")
@@ -170,7 +174,7 @@ def bq_staged_reads(infra_path):
     return access
 
 
-def stitch(access, page_of, owner_aware=True):
+def stitch(access, page_of, owner_aware=True, repo_paths=None):
     """Group by (store, collection); a collection touched by >=2 repos → shares-datastore edges.
 
     Owner-aware refinement (the one allowed iteration, analogous to §9.2 grounding):
@@ -178,7 +182,7 @@ def stitch(access, page_of, owner_aware=True):
     collection has an owner, every OTHER accessor is connected to the OWNER (accessor → owner: it depends
     on the originator's data), and incidental co-writers are NOT connected to each other. This kills the
     over-connection FP where two repos both merely touch a collection a THIRD repo owns (e.g. monitor and
-    scheduler both read librechat-owned `users` — no real monitor↔scheduler edge). If a collection has NO
+    scheduler both read frontend-owned `users` — no real monitor↔scheduler edge). If a collection has NO
     schema owner, fall back to writer→reader pairing among its accessors (e.g. cleanup ORIGINATES
     `pendingdeletedconversations`, monitor reads it → monitor → cleanup).
     """
@@ -193,6 +197,29 @@ def stitch(access, page_of, owner_aware=True):
         prov[key][a["repo"]].append(a["provenance"])
         if a.get("model"):                            # a mongoose model = schema owner
             owner[key] = a["repo"]
+
+    # ── sole-writer ownership (the non-JS originator) ─────────────────────────
+    # A declared mongoose model is the strongest ownership signal, and the only one that existed:
+    # `owner` was set exclusively from `a["model"]`, which only scan_mongoose produces. So a
+    # collection ORIGINATED IN PYTHON could never have an owner, no matter how unambiguous its
+    # provenance — and `owner` is the schema-owner fact that makes blast radius answerable.
+    #
+    # The fallback signal: a shared collection with exactly ONE writer and N readers has an
+    # unambiguous source of truth, whatever language wrote it. That is weaker than a schema
+    # declaration and is NOT presented as equivalent — `owner_basis` records which signal was used,
+    # so an inferred owner can never be mistaken for a declared one.
+    #
+    # Deliberately narrow: two or more writers means no inference at all (ambiguous), and a
+    # read-only collection is skipped as before.
+    owner_basis = {k: "declared-schema" for k in owner}
+    if owner_aware:
+        for key, repos in by_coll.items():
+            if key in owner or len(repos) < 2:
+                continue
+            writers = [r for r, modes in repos.items() if any("write" in m for m in modes)]
+            if len(writers) == 1:
+                owner[key] = writers[0]
+                owner_basis[key] = "sole-writer"
 
     pairs = defaultdict(lambda: {"collections": [], "detail": []})
     for (store, coll), repos in by_coll.items():
@@ -212,6 +239,7 @@ def stitch(access, page_of, owner_aware=True):
             pk = tuple(sorted((a, b)))
             pairs[pk]["collections"].append(coll)
             pairs[pk]["detail"].append({"store": store, "collection": coll, "owner": own,
+                                        "owner_basis": owner_basis.get(key),
                                         pk[0]: sorted(repos[pk[0]]), pk[1]: sorted(repos[pk[1]]),
                                         "provenance": {pk[0]: prov[key][pk[0]][:2],
                                                        pk[1]: prov[key][pk[1]][:2]}})
@@ -237,11 +265,23 @@ def stitch(access, page_of, owner_aware=True):
             "kind": "shares-datastore", "src_repo": src, "target_repo": dst,
             "store": info["detail"][0]["store"], "collections": colls,
             "owner": (next(iter(owners)) if len(owners) == 1 else None),
+            # which signal established the owner: "declared-schema" (a mongoose model — strongest)
+            # or "sole-writer" (inferred from being the only writer). Never presented as equivalent.
+            "owner_basis": (sorted({d["owner_basis"] for d in info["detail"]
+                                    if d.get("owner_basis")})[0]
+                            if len(owners) == 1 else None),
             "src_modes": sorted(a_modes if src == a else b_modes),
             "target_modes": sorted(b_modes if dst == b else a_modes),
             "bidirectional": ("write" in a_modes and "write" in b_modes and not owners),
             "provenance": [p for d in info["detail"] for p in d["provenance"].get(src, [])][:3],
-            "page": page_of.get(src, src),
+            # `page` is the wiki page title this edge is written onto, from [emit.pages].
+            # `page_mapped` says whether that lookup SUCCEEDED: without it, the fallback to the raw
+            # repo name is indistinguishable from a real title, and the edge silently lands nowhere.
+            "page": (page_of or {}).get(src, src),
+            "page_mapped": src in (page_of or {}),
+            # freshness is stamped on the SOURCE repo: that is the work tree whose code was read
+            # to assert this edge, so it is the revision a staleness check must compare against.
+            "extracted_from": freshness.stamp(src, (repo_paths or {}).get(src)),
         })
     return edges
 
@@ -271,7 +311,7 @@ def main():
             access += mg
     access += bq_staged_reads(a.infra)
 
-    edges = stitch(access, page_of)
+    edges = stitch(access, page_of, repo_paths={n: ws / r for n, r in repos.items()})
     Path(a.out).write_text(json.dumps({"access": access, "shared_datastore_edges": edges}, indent=2))
 
     from collections import Counter
