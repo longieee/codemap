@@ -39,7 +39,8 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
   checkers**: it EXCLUDES `docs/` (design prose that legitimately discusses paths and the security
   model), `tests/` (the test files themselves grep for these very tokens), the compiled binaries
   under `bin/` (binary, not text), and everything already excluded from the shippable set. This is
-  the set the self-containment checks (criteria 8–9) scan — text files under `skills/`, `stitcher/`,
+  the set criterion **9** scans (criterion 8 scans the whole shippable set as of 2026-09-15, since
+  `docs/` ships) — text files under `skills/`, `stitcher/`,
   `init/`, `discovery/`, `eval-harness/`, `config/*.example`, `config/.fmg.toml.tmpl`, `install.sh`,
   `manifests/`, `.claude-plugin/plugin.json`, and `.mcp.json`.
 - **Platform tag** = `<os>-<arch>` where `os = uname -s` lower-cased and `arch = uname -m`
@@ -65,15 +66,35 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
    non-empty `name` and a non-empty `description` field.
 7. `skills/wiki-init/` also contains the orchestration helper `wiki-init.sh`.
 
-### C. Self-containment — no host leakage in the operational shippable set
-> Scanned over the **operational shippable set** (see Terms) — text files only, excluding `docs/`,
-> `tests/`, and the `bin/` binaries. Prose docs and the test file legitimately mention these tokens;
-> the point is that the operational files an install actually uses do not leak host specifics or
-> ship secret plumbing.
+### C. Self-containment — no host leakage
+> Criterion 8 is scanned over the **whole shippable set** (text files only, `bin/` binaries
+> excepted). Criterion 9 is scanned over the narrower **operational shippable set** (see Terms),
+> because prose docs and the test file legitimately mention `_secrets` while the operational files
+> an install actually uses must not ship secret plumbing.
 
-8. **No absolute home paths.** No file in the operational shippable set contains the substring
-   `/home/` or `/Users/` (host-specific absolute paths). Files reference paths only relative to the
-   package root or via documented env vars (e.g. `${CLAUDE_PLUGIN_ROOT}`, `$VAULT`, `<CODEMAP_ROOT>`).
+8. **No host-specific paths.** No text file in the **shippable set** carries a host-specific path:
+   an absolute `/home/<component>/…` or `/Users/<component>/…`, or a `~`-rooted reference into a
+   **visible** home subdirectory (a particular person's estate). Files reference paths only
+   relative to the package root, via documented env vars (e.g. `${CLAUDE_PLUGIN_ROOT}`, `$VAULT`,
+   `<CODEMAP_ROOT>`), or — in documentation — via placeholders (`<workspace>`, `<canonical>`,
+   `<user>`). A `~`-rooted **dotfile** root (`~/.config/…`, `~/.cargo/bin`) is a tool convention
+   rather than an estate path and is not a violation.
+
+   Two exceptions, both narrow: a line carrying the `boundary-allow` marker (the detector's own
+   probe literals — per line, never file-wide), and `config/codemap.toml`, which is outside the
+   shippable set entirely because it is the git-ignored per-instance config and does not ship.
+
+   *(Amended 2026-09-15. Three gaps, all live at once, and together they let an absolute host path
+   ship. The scan covered only the operational set, so `docs/` — which ships, and where a published
+   host path reads exactly as authoritative as one in code — was unscanned. It matched the bare
+   substrings `/home/` and `/Users/`, which cannot distinguish a real path from a document naming
+   the pattern, so the only way to discuss the rule was to sit outside the scan; the pattern now
+   requires a path component after the prefix, which is why this criterion can state its own rule
+   with no exemption. And a `~`-rooted estate path was not matched at all. The `~` limb is
+   deliberately literal-free — it keys on visible-vs-dotfile, not on a list of estate directory
+   names, because such a list would itself be client content under criterion 22 and would go stale.
+   The detector is positive-controlled: every probe literal must match and the file walk must be
+   non-empty, so neither a broken pattern nor an empty walk can report a clean pack.)*
 9. **No secret plumbing.** No file in the operational shippable set contains the substring
    `_secrets`, nor sources a credential file (a `source ...` / `.` line pulling in a `*-access.sh`
    or `.env` secrets file). Bundled skills are sanitized copies; instance secret access is out of
@@ -192,7 +213,11 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
     Totals of 163 and 175 each appeared in a document while correct and were stale within days.
     A total quoted anywhere in the pack's documentation — including any quoted here — is therefore a
     **dated observation, superseded by the next run**, and a reader who needs the current figure runs
-    the runner. Observed 2026-09-14: 202/202, 0 skipped, of which this contract's suite is 29 (191/191 before AIL-414 added 11 checks; see ARCHITECTURE.md §8.8 for the one suite that reported 8/9 on the first of those runs).
+    the runner. Observed 2026-09-15: 204/204, 0 skipped, of which this contract's suite is 31/31 —
+    the single red being `test_c23` (criterion 23), which reports the destination-only stamps still
+    tracked in the canonical repo and clears only with the owner's index change. (202/202 on
+    2026-09-14 before criteria 23–24 added 2 checks; 191/191 before AIL-414 added 11; see
+    ARCHITECTURE.md §8.8 for the one suite that reported 8/9 on the first of those runs.)
 
 ### G. Referential integrity
 21. Every intra-package path referenced by the manifest(s) and by `install.sh`'s dependency logic
@@ -206,7 +231,8 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
     post-install.)*
 
 ### H. Client boundary (pack content is deployed into consumer workspaces)
-> Scanned over the **whole shippable set** — wider than criteria 8–9 — because `docs/` and `tests/`
+> Scanned over the **whole shippable set** — as criterion 8 now also is, and wider than criterion
+> 9 — because `docs/` and `tests/`
 > ship too, and a client name in prose is published just as surely as one in code. Text files only;
 > the compiled binaries under `bin/` are out of scope for a text scan (see the note below).
 
@@ -222,6 +248,49 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
     over: the check reads text files, so the vendored `bin/fmg-<platform-tag>` binary is not
     scanned — it currently embeds the build machine's cargo-registry paths, which a rebuild with
     `--remap-path-prefix` is expected to clear.)*
+
+### I. Canonical pack vs vendored copy (the pack must not look like a deployment)
+> Added 2026-09-15, after this state was found and nothing in the suite objected to it: a
+> **deployment** had been moved in to become the canonical tree. Both stamps were tracked files
+> asserting nonsense about the canonical repo (`canonical_repo=unknown`, `canonical_sha=unknown`, a
+> `tracked_ref` naming a tag this repo does not have, and an absolute host path in `pack_path`), and
+> `deploy.sh` — the one file a deployment excludes — was gone, leaving the pack documenting a tool
+> it did not contain. Criteria 8–22 were all green throughout. These two close that.
+
+23. **A canonical pack carries no destination-only stamps.** `PROVENANCE` and `PACK_SOURCE` belong
+    to a destination. In the canonical pack they MUST be listed in `.gitignore` **and** MUST NOT be
+    present in the git index. The two limbs are separate on purpose: the ignore entry is the
+    durable half (an ignored path cannot be swept back in by `git add -A`, which is how they
+    arrived) and is git-free, so it is assertable in a vendored copy and an export as well; the
+    index limb is the half that detects the defect that already happened, and runs wherever
+    trackedness is determinable. **Neither limb tests for existence** — a vendored copy
+    legitimately has both files on disk. Where git cannot be asked, the check says which limb
+    carried it rather than reporting an unqualified pass.
+
+24. **The pack contains the deploy tool its docs describe.** Decided by the same
+    canonical-vs-vendored discrimination (a vendored copy carries `PROVENANCE` and has no `.git`),
+    and **both branches assert**:
+    - canonical pack or export — `deploy.sh` exists, is executable, parses (`bash -n`), and carries
+      the load-bearing names of its contract: the three modes (`copy`, `sync`, `link`), `--check`,
+      the `_codemap` destination, `PRIVATE_WORKING_STATE`, `DEST_ONLY_STAMPS`, and `--delete`.
+    - vendored copy — `deploy.sh` is **absent**. A copy that carries it can be used as a deploy
+      source, which the topology forbids ("a deployed copy has no authority").
+
+    Name presence is a weak proxy for behaviour and is not claimed as more: it catches a tool that
+    has silently lost a mode or become a stub, not one whose rsync flags are wrong. The dry-run and
+    exclusion behaviour is **not covered by this suite at all** — exercising it means deploying into
+    a scratch workspace, and the suite must not write outside the package (criterion 14's rule
+    applied to itself). It is covered by an out-of-suite seeded-defect run against a fixture
+    workspace: a script someone has to remember to run, which is weaker than a test, and said here
+    so a green criterion 24 is not read as more coverage than it is.
+
+25. **The deploy destination is `<workspace>/_codemap`.** The underscore prefix marks the directory
+    as pack-managed rather than project content — the same convention the estate's other pack uses
+    for its `_harness` copy. It was `<workspace>/codemap` until 2026-09-15; a pack-managed directory
+    that looks like project content invites exactly the in-place edit the topology exists to
+    prevent. `--check` and `link` mode name the same path. Enforced through criterion 24's token
+    list rather than by a test of its own — the destination is a string inside `deploy.sh`, and a
+    test that re-derived it would only be checking its own copy of it.
 
 ## CLI / invocation the tests may rely on
 
@@ -247,6 +316,12 @@ of the owned core (that is M1/M2/M3's contracts) and not the live install of net
   which is precisely the confusion the pending-capability set exists to prevent. Neither is reported
   as a question failure: a question failure means the served data was wrong, not that the store could
   not be asked.
+- `bash deploy.sh [--mode=copy|sync|link] [--check] <workspace>` — makes a vendored copy at
+  `<workspace>/_codemap`. Exit codes: `0` deployed (or dry-run complete), `64` usage (unknown flag
+  or mode, missing/invalid workspace, `--mode=link` with no symlink present), `3` the boundary gate
+  refused — either it found violations or it could not run, `4` refused because the tree it was run
+  from is itself a deployed copy. `--check` performs no mutation: no copy, no stamp, and not even
+  the destination directory.
 - `bash install.sh --check` — preflight; exits 0 iff every dependency is already satisfied, else
   non-zero after printing `FAIL` lines; performs no mutation and no network access.
 - Tests run with plain `python3` (no pytest dependency): expose `test_*()` functions AND a

@@ -350,14 +350,25 @@ call-site grounding result (20% → 0%): a principled attribution step, not a th
 DATA-STORE + INFRA gate, not the §6.2 HTTP-FP gate** — the fresh repos have zero outbound HTTP, so the
 HTTP-FP gate is honestly deferred to the first external drop-in that has a call surface.
 
-### 6.6 Current measured state (2026-09-14 re-measurement)
+### 6.6 Current measured state (2026-09-14 re-measurement; suite total re-run 2026-09-15)
 
 §6.1–6.5 are dated spike results and are left as written. This subsection is the **present** state of
 the pack, re-measured on the canonical tree, and it is the section to quote when a number is asked for.
 Each figure was reproduced independently of the track that produced the fix.
 
-**Test suites — 202 of 202, 0 skipped**, from the pack's own reconciling runner `tests/run_all.py`
-(191 of 191 before AIL-414 added 11 checks: 6 on C13.4-C13.6 extraction, 5 on the pipeline wiring):
+**Two dates, deliberately.** Every figure below is the 2026-09-14 re-measurement except the suite
+total, which was re-run on 2026-09-15 after criteria 23–25 were added; a single section date would
+have made one of the two wrong. Each figure carries the date it was taken.
+
+**Test suites — 203 of 204, 0 skipped** (re-run 2026-09-15), from the pack's own reconciling runner
+`tests/run_all.py` (202 of 202 on 2026-09-14, before criteria 23–24 added 2 checks; 191 of 191
+before AIL-414 added 11: 6 on C13.4-C13.6 extraction, 5 on the pipeline wiring):
+
+**The one red is deliberate and is not a regression.** `test_c23` reports that `PROVENANCE` and
+`PACK_SOURCE` are still TRACKED files in this repo — the defect it was written to detect, arrived
+with a deployment that was moved in to become the canonical tree. It clears with the index change
+(`git rm --cached PROVENANCE PACK_SOURCE`), which is an owner commit and not something the check
+can do for itself. A green here before that commit would mean the check was not looking.
 
 | suite | passed / defined |
 |---|---|
@@ -365,11 +376,11 @@ Each figure was reproduced independently of the track that produced the fix.
 | `test_inventory.py` | 9 / 9 |
 | `test_lint.py` | 21 / 21 |
 | `test_logical_layer.py` | 50 / 50 |
-| `test_packaging.py` | 29 / 29 |
+| `test_packaging.py` | 30 / 31 *(the one red: `test_c23`, above)* |
 | `test_serving_tools.py` | 47 / 47 |
 | `test_tier_a_widen.py` | 9 / 9 *(known flake — §8.8)* |
 | `test_write_door.py` | 28 / 28 |
-| **total** | **202 / 202** |
+| **total** | **204 / 204** |
 
 Each suite's passed count equals the number of `test_*` functions its file defines, which is what the
 runner reconciles. **Quote the runner, never a note:** earlier figures of 163 and 175 were each correct

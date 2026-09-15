@@ -89,8 +89,23 @@ CLIENT_BOUNDARY_TOKENS = [
     "seta",         # boundary-allow: criterion-22 detector literal
 ]
 
-# The marker that exempts a single line from the criterion-22 scan.
+# The marker that exempts a single line from the criterion-22 scan, and from the
+# criterion-8 host-path scan. Per LINE, never file-wide, so every exemption is
+# reviewable where it sits.
 BOUNDARY_ALLOW_MARKER = "boundary-allow"
+
+# Contract C8: a host-specific path. Two limbs, both requiring a real path rather
+# than the bare prefix, so a document can NAME the pattern without sitting outside
+# the scan (that exclusion is what let an absolute path ship):
+#   - absolute: /home/<component>/... or /Users/<component>/...
+#   - tilde:    ~/<VISIBLE component>/... -- a person's estate. A dotfile root
+#     (~/.config, ~/.cargo) is a tool convention, not an estate path, and is not
+#     matched. Literal-free by construction: no estate directory names appear here,
+#     because a list of them would itself be client content (criterion 22).
+_HOST_PATH_RE = re.compile(
+    r"(?:/home/|/Users/)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*"
+    r"|~/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9._-]+)*"
+)
 
 # Destination-only stamps written by deploy.sh into a VENDORED copy (canonical identity + refresh
 # source). They are not pack content -- the canonical pack never has them -- so they are outside
@@ -112,12 +127,17 @@ SEVEN_DEP_PATTERNS = {
     "vault graph config (.fmg.toml)": r"\.fmg\.toml\b",
 }
 
-# Contract "Terms": the OPERATIONAL shippable set that criteria C8/C9 scan. It
-# is the shippable set MINUS prose docs (docs/), the self-referential test files
-# (tests/), and the compiled bin/ binaries -- because docs and the test file
-# legitimately mention `/home/`, `/Users/`, `_secrets`. The point of 8/9 is that
-# the operational files an install actually uses do not leak host specifics or
-# ship secret plumbing. Whole-tree dirs walked (text files only):
+# Contract "Terms": the OPERATIONAL shippable set. It is the shippable set MINUS
+# prose docs (docs/), the self-referential test files (tests/), and the compiled
+# bin/ binaries. Criterion C9 scans it: docs and the test file legitimately
+# mention `_secrets`, and the point of C9 is that the operational files an
+# install actually uses do not ship secret plumbing.
+#
+# C8 used to scan this narrower set too and no longer does -- it scans the whole
+# shippable set, because docs/ ships and a host path in prose is published just
+# as surely as one in code. Its pattern requires a path component after the
+# prefix, which is what lets a document name the rule without being exempt from
+# it. Whole-tree dirs walked (text files only):
 _OPERATIONAL_DIRS = ["skills", "stitcher", "init", "discovery", "eval-harness",
                      "manifests", ".claude-plugin", "tools"]
 
@@ -609,19 +629,96 @@ def test_b7_wiki_init_has_orchestration_helper():
 # =========================================================================== #
 # C. Self-containment -- no host leakage in the shippable set                 #
 # =========================================================================== #
-def test_c8_no_absolute_home_paths():
-    """Contract C8: no text file in the OPERATIONAL shippable set (excludes docs/,
-    tests/, bin/ binaries -- see Terms) contains the substring `/home/` or
-    `/Users/` (host-specific absolute paths)."""
+def test_c8_no_host_specific_paths():
+    """Contract C8: no text file in the SHIPPABLE set carries a host-specific
+    path -- an absolute `/home/<user>/...` or `/Users/<user>/...`, or a
+    `~`-rooted reference into a visible home subdirectory (a particular person's
+    estate). Documentation uses placeholders (`<workspace>`, `<canonical>`).
+
+    WIDENED 2026-09-15, and the widening is the point. The check used to scan the
+    OPERATIONAL set only (docs/ and tests/ excluded) and to match the bare
+    literals `/home/` and `/Users/`. Three gaps followed from that, all live at
+    once:
+
+      1. `docs/` ships. A host path in prose is published exactly as surely as
+         one in code, and docs/ was the one place the old scan could not see.
+      2. A bare-substring match cannot tell a real path from a doc that NAMES
+         the pattern, so the only way to discuss the rule was to sit outside the
+         scan. The pattern now requires a path COMPONENT after the prefix, so
+         `/home/` written as a token (this docstring, the contract's criterion 8)
+         is not a match, while the same prefix followed by a real component is.
+      3. A `~`-rooted estate path was not matched at all. `~/<estate>/codemap` is
+         as host-specific as the absolute form and reads as portable.
+
+    Note that this docstring can state the rule without any exemption, because a
+    placeholder (`<user>`, `<estate>`) is not a path component -- which is the
+    convention the criterion requires of documentation. The literal offending
+    forms live in the probe list below, each marked.
+
+    The `~` limb is deliberately literal-free: it matches `~/` followed by a
+    VISIBLE component, because a tool's own config lives in a dotfile directory
+    (`~/.config/...`, `~/.cargo/bin`) while `~/<visible>` names somebody's
+    personal estate. This needs no list of estate directory names -- a list would
+    itself be client content (criterion 22) and would go stale.
+
+    Two exceptions, both narrow. The detector's own probe literals below are
+    exempt per LINE via the `boundary-allow` marker (never file-wide), and
+    `config/codemap.toml` is outside the shippable set entirely -- it is the
+    git-ignored per-instance config, whose absolute paths are legitimate because
+    it does not ship.
+
+    The instrument is positive-controlled: every probe below must match, and the
+    file walk must be non-empty. A broken regex or an empty walk would otherwise
+    report a clean pack.
+    """
+    # Known-positive population. A clean tree contains no offenders, so the scan
+    # coming back empty proves nothing on its own -- these probes are what proves
+    # the patterns still fire. Neutral stand-in names (criterion 22).
+    probes_bad = [
+        "/home/operator/estate/codemap",          # boundary-allow: C8 detector probe
+        "pack_path=/home/operator/estate/codemap",  # boundary-allow: C8 detector probe
+        "/Users/operator/estate/codemap",         # boundary-allow: C8 detector probe
+        "~/estate/codemap",                       # boundary-allow: C8 detector probe
+        "cd ~/vault && ls",                       # boundary-allow: C8 detector probe
+    ]
+    # Must NOT fire: the bare prefix as a discussed token, a placeholder path, and
+    # a dotfile config dir that is a tool convention rather than an estate path.
+    probes_ok = [
+        "the substring `/home/` or `/Users/`",    # boundary-allow: C8 detector probe
+        "<canonical>/codemap -> <workspace>/_codemap",
+        "~/.config/opencode/agents",              # boundary-allow: C8 detector probe
+        "~/.cargo/bin/fmg",                       # boundary-allow: C8 detector probe
+    ]
+    for s in probes_bad:
+        assert _HOST_PATH_RE.search(s), \
+            "C8: the detector no longer matches a known host path %r -- the instrument is silent" % s
+    for s in probes_ok:
+        assert not _HOST_PATH_RE.search(s), \
+            "C8: the detector fires on %r, which is portable -- an over-firing gate gets switched off" % s
+
+    scanned = 0
     offenders = []
-    for p in _iter_operational_files():
+    for p in _iter_shippable_files():
         text = _safe_text(p)
         if text is None:
-            continue  # binary artifact -- not a source leak
-        if "/home/" in text or "/Users/" in text:
-            offenders.append(_rel(p))
-    assert not offenders, \
-        "C8: operational file(s) contain absolute home paths: %r" % sorted(set(offenders))
+            continue  # binary artifact -- not a source leak (see criterion 22's scope note)
+        scanned += 1
+        for lineno, line in enumerate(text.splitlines(), 1):
+            m = _HOST_PATH_RE.search(line)
+            if not m:
+                continue
+            if BOUNDARY_ALLOW_MARKER in line:
+                continue
+            offenders.append("%s:%d: %s" % (_rel(p), lineno, m.group(0)))
+
+    assert scanned > 20, (
+        "C8: the scan read only %d text file(s) from the shippable set -- the walk is broken, and "
+        "a clean result from an empty walk is meaningless" % scanned
+    )
+    assert not offenders, (
+        "C8: host-specific path(s) in the shippable set -- documentation must use placeholders "
+        "(<workspace>, <canonical>) and code must resolve paths at runtime: %r" % sorted(offenders)
+    )
 
 
 def test_c9_no_secret_plumbing():
@@ -653,6 +750,165 @@ def test_c10_config_template_generic_and_instance_gitignored():
 
     assert _is_gitignored("config/codemap.toml"), \
         "C10: config/codemap.toml must be git-ignored (no matching .gitignore entry found)"
+
+
+# =========================================================================== #
+# I. Canonical pack vs vendored copy -- the stamps and the deploy tool        #
+# =========================================================================== #
+def _git_tracks(rel):
+    """Tri-state: True if `rel` is in this repo's git index, False if it is not,
+    None if trackedness could not be determined (no git binary, not a checkout,
+    or git refused).
+
+    None is returned rather than False on purpose. False means "asked git, it
+    said no"; None means "could not ask", and a check that treats the two alike
+    is a check that passes on absent evidence -- which is the exact failure mode
+    that let a tracked PROVENANCE sit in this pack unnoticed.
+    """
+    if not (ROOT / ".git").exists():
+        return None
+    if shutil.which("git") is None:
+        return None
+    try:
+        res = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch", "--", rel],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode == 0:
+        return bool(res.stdout.strip())
+    # git distinguishes "no such tracked path" (rc=1, a real answer) from a
+    # repository it cannot read at all (rc=128, no answer).
+    if res.returncode == 1:
+        return False
+    return None
+
+
+def _looks_like_vendored_copy():
+    """True when this tree is a DEPLOYED copy rather than the canonical pack.
+
+    The discriminator is the pair, and neither half works alone: a vendored copy
+    carries a PROVENANCE stamp (deploy.sh writes one into every non-symlink
+    destination) and has no .git (the copy excludes it). A `git archive`
+    extraction of the canonical has neither, and is correctly NOT a vendored copy
+    -- it does ship deploy.sh.
+    """
+    return (ROOT / "PROVENANCE").is_file() and not (ROOT / ".git").exists()
+
+
+def test_c23_canonical_pack_carries_no_destination_stamps():
+    """Contract C23: PROVENANCE and PACK_SOURCE are DESTINATION-ONLY. The
+    canonical pack must neither track them nor allow them to be re-committed.
+
+    This is the check that would have caught the state this pack was found in on
+    2026-09-15: a deployment had been moved in to become the canonical tree, so
+    both stamps were tracked files asserting nonsense about it
+    (`canonical_repo=unknown`, a `tracked_ref` naming a tag that no longer
+    existed, and an absolute host path in `pack_path` that no other check saw).
+
+    TWO LIMBS, because the interesting one cannot always run:
+
+      1. .gitignore must cover both stamps. Git-free, so it runs everywhere --
+         in the canonical pack, in a vendored copy, in an export. This is also
+         the DURABLE half: an ignored path cannot be swept back in by `git add
+         -A`, which is how the stamps arrived.
+      2. Where trackedness is determinable, neither stamp may be in the index.
+         This is the half that detects the defect that already happened.
+
+    Limb 1 always has evidence, so the check is never vacuous; limb 2 adds the
+    detection wherever git can answer. A vendored copy legitimately HAS both
+    files on disk, which is why neither limb tests for existence.
+    """
+    for stamp in sorted(_DEST_ONLY_STAMPS):
+        assert _is_gitignored(stamp), (
+            "C23: %s must be listed in .gitignore -- it is a destination-only stamp, and without "
+            "an ignore entry `git add -A` in the canonical pack silently re-commits it (which is "
+            "how it got tracked)" % stamp
+        )
+
+    undeterminable = []
+    tracked = []
+    for stamp in sorted(_DEST_ONLY_STAMPS):
+        state = _git_tracks(stamp)
+        if state is None:
+            undeterminable.append(stamp)
+        elif state:
+            tracked.append(stamp)
+    assert not tracked, (
+        "C23: destination-only stamp(s) are TRACKED files in this pack: %r. A canonical pack must "
+        "not carry a deployment's stamps -- they describe a destination, not this tree. Remove "
+        "them from the index (`git rm --cached <stamp>`); the .gitignore entry then keeps them "
+        "out." % tracked
+    )
+    # Not an assertion: in a vendored copy or an export there is no index to ask,
+    # and limb 1 is what carries the check there. Stated so a reader of a green
+    # run knows which limbs actually ran.
+    if undeterminable:
+        print("    C23 note: trackedness undeterminable for %r (no readable git index here); "
+              "limb 1 (.gitignore) carried this check" % undeterminable)
+
+
+def test_c24_deploy_tool_present_and_matches_its_contract():
+    """Contract C24: the pack contains the tool its own docs describe.
+
+    `deploy.sh` is the only sanctioned way a copy is made, and it is excluded
+    from the copy it makes -- which is what stops a deployed copy acting as a
+    deploy source. That exclusion is also how the file was LOST: a deployment was
+    promoted to canonical, and the pack was left documenting in `README.md` and
+    `docs/packaging-contract.md` a tool it did not contain. Nothing detected it.
+
+    The branches are decided by _looks_like_vendored_copy(), and BOTH assert --
+    a branch that asserts nothing is a branch that always passes:
+
+      - canonical pack / export: deploy.sh must exist, be executable, parse
+        (`bash -n`), and carry the contract's load-bearing names -- the three
+        modes, `--check`, the `_codemap` destination, and the two exclusion lists.
+      - vendored copy: deploy.sh must be ABSENT. A copy that carries it can be
+        used as a deploy source, which the topology forbids.
+
+    Name presence is a weak test of behaviour and is not claimed as more: it
+    catches a tool that has silently lost a mode or been replaced by a stub, not
+    one whose rsync flags are wrong.
+
+    NOTHING IN THIS SUITE COVERS THE DRY-RUN OR EXCLUSION BEHAVIOUR, and that
+    gap is stated rather than implied: exercising it means deploying into a
+    scratch workspace, and this suite must not write outside the package
+    (criterion E14's rule, applied to itself). It is covered by an out-of-suite
+    seeded-defect run against a fixture workspace, which is a script somebody has
+    to remember to run -- weaker than a test, and named here so a green C24 is
+    not read as more coverage than it is.
+    """
+    script = ROOT / "deploy.sh"
+    if _looks_like_vendored_copy():
+        assert not script.exists(), (
+            "C24: this tree is a vendored copy (PROVENANCE present, no .git) and carries "
+            "deploy.sh. A deployed copy has no authority and must not be usable as a deploy "
+            "source; deploy.sh is excluded from the copy for that reason."
+        )
+        return
+
+    assert script.is_file(), (
+        "C24: deploy.sh is missing, and README.md + docs/packaging-contract.md both document it. "
+        "The pack must not document a tool it does not contain."
+    )
+    assert os.access(str(script), os.X_OK), "C24: deploy.sh is not executable"
+    res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, \
+        "C24: deploy.sh fails `bash -n`; rc=%d stderr=%r" % (res.returncode, res.stderr)
+
+    text = _read_text(script)
+    required = {
+        "copy mode": "copy",
+        "sync mode": "sync",
+        "link mode": "link",
+        "--check dry run": "--check",
+        "the _codemap destination": "_codemap",
+        "private-working-state exclusions": "PRIVATE_WORKING_STATE",
+        "destination-only stamps": "DEST_ONLY_STAMPS",
+        "converge with --delete": "--delete",
+    }
+    missing = sorted(label for label, tok in required.items() if tok not in text)
+    assert not missing, \
+        "C24: deploy.sh does not mention its documented %s" % missing
 
 
 # =========================================================================== #

@@ -1,5 +1,21 @@
 # local instance config (references real paths/names — not part of the shareable package)
 config/codemap.toml
+
+# destination-only stamps, written by deploy.sh INTO a vendored copy and never present in the
+# canonical pack (docs/packaging-contract.md criterion 23). Ignored rather than merely "not added":
+# both were found TRACKED in this repo on 2026-09-15, having arrived with a deployment that was
+# moved in to become the canonical tree, where they asserted canonical_repo=unknown, a tracked_ref
+# naming a tag this repo does not have, and an absolute host path in pack_path. An ignore entry is
+# what stops `git add -A` sweeping them back in. tests/test_packaging.py::test_c23 enforces both
+# halves (ignored here, and absent from the index).
+/PROVENANCE
+/PACK_SOURCE
+
+# pending commit-message files prepared by a sandbox session for the owner to commit from
+# (`git commit -F <file>`); each change gets its own name so two pending messages cannot be
+# confused. Transient working state, never pack content — and ignoring them keeps the same
+# `git add -A` that committed the stamps above from committing a commit message too.
+/COMMIT_MSG-*.txt
 .venv/
 .install-lock
 *.candidates.json

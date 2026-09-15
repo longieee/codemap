@@ -25,7 +25,7 @@ codemap is a **pack**: one canonical tree, vendored into each workspace that use
 | | |
 |---|---|
 | **Canonical** | `<canonical>/codemap` — the one tree that is edited, versioned (`VERSION`) and reviewed. Its path is an operator detail, recorded in the Lab's own pack register and in a sync-mode copy's `PACK_SOURCE`, deliberately not written into pack content. |
-| **Vendored copy** | `<workspace>/codemap/` — a deployed copy, stamped with `PROVENANCE`. Never edited in place. |
+| **Vendored copy** | `<workspace>/_codemap/` — a deployed copy, stamped with `PROVENANCE`. Never edited in place. The **underscore prefix** marks the directory as pack-managed rather than project content, the same convention the estate's other pack uses for its `_harness` copy. |
 | **How a copy is made** | `bash <canonical>/codemap/deploy.sh [--mode=copy\|sync\|link] [--check] <workspace>` |
 
 The rule that makes this work: **edit the canonical pack and re-deploy — never edit a deployed
@@ -78,12 +78,20 @@ kind of per-instance file, add it to `PRIVATE_WORKING_STATE` in `deploy.sh` in t
 |---|---|
 | `copy` (default) | Vendored copy, **no `--delete`**. Safe for a first deploy into a workspace that already holds files. |
 | `sync` | Converge: adds `--delete` so the copy is exactly the canonical tree instead of the union of every tree ever deployed into it, and writes `PACK_SOURCE`. Private state and the stamps are excluded, so converging never removes them. |
-| `link` | No copy: `<workspace>/codemap` is a symlink you create yourself. `deploy.sh` detects it, runs in place, and skips both copy and stamp (identity comes from the canonical pack's own git). An existing symlink always wins over `--mode`. |
+| `link` | No copy: `<workspace>/_codemap` is a symlink you create yourself. `deploy.sh` detects it, runs in place, and skips both copy and stamp (identity comes from the canonical pack's own git). An existing symlink always wins over `--mode`. |
 
 `deploy.sh --check` dry-runs any mode — it prints what would change, creates nothing and stamps
-nothing. Deploying also runs the client-boundary check (`tests/test_packaging.py` criterion 22) on
-the tree about to be copied, because deploying is publishing; if the check cannot run, it says so
-loudly rather than reporting a pass.
+nothing, not even the destination directory. Deploying also runs the **boundary gate** on the tree
+about to be copied, because deploying is publishing: `tests/test_packaging.py` criterion 22 (no
+client, host or person name in a shipped text file) and criterion 8 (no host-specific path in one).
+If the gate cannot run — no `python3`, or the suite will not import — the deploy is **refused**; a
+gate that did not run must not look like a gate that passed. `CODEMAP_DEPLOY_SKIP_GUARD=1` skips it
+explicitly and says so on stderr.
+
+`deploy.sh` also refuses to run from a tree that is itself a deployed copy (a `PROVENANCE` stamp
+and no git checkout), which is the assertion behind "a deployed copy cannot be a deploy source".
+If a *canonical* checkout is found carrying a stamp, it warns and continues — the stamps are
+excluded from the copy, so the destination is unaffected, but the pack needs cleaning.
 
 ### Re-deploying an existing workspace
 
@@ -92,8 +100,14 @@ cd <canonical>/codemap
 ./deploy.sh --check <workspace>          # see the diff first
 ./deploy.sh <workspace>                  # refresh pack files; private state untouched
 ./deploy.sh --mode=sync <workspace>      # converge: also removes files the pack dropped
-cat <workspace>/codemap/PROVENANCE       # confirm what the copy now follows
+cat <workspace>/_codemap/PROVENANCE      # confirm what the copy now follows
 ```
+
+**The destination changed on 2026-09-15**, from `<workspace>/codemap` to `<workspace>/_codemap`. A
+workspace deployed before that carries the old directory, and a re-deploy will not converge it —
+it creates the new one beside it. Move the old directory (keeping its private instance state) or
+deploy fresh and delete the old copy once the new one is verified; `deploy.sh --check` shows what
+the new destination would receive before anything is written.
 
 ## Install (one command)
 
@@ -183,7 +197,7 @@ accepted set to the six will reject valid output (the normative table is
 ## Verify
 
 ```bash
-python3 tests/run_all.py                  # ALL suites, reconciled: 202/202, 0 skipped
+python3 tests/run_all.py                  # ALL suites, reconciled: 204/204, 0 skipped (2026-09-15)
 python3 tests/test_packaging.py           # packaging acceptance tests alone (contract-derived)
 python3 eval-harness/navigation-eval.py   # navigation eval on the bundled fixture: 20/20, rc=0
 ./deploy.sh --check <workspace>           # deploy dry run: what a re-deploy would change
@@ -192,6 +206,10 @@ python3 eval-harness/navigation-eval.py   # navigation eval on the bundled fixtu
 `tests/run_all.py` is the **only** place to read a suite total from: it reconciles each suite's
 passed count against the number of `test_*` functions the file defines, so a total cannot drift from
 a stale note. (Figures of 163 and 175 were each correct when counted and went stale within days.)
+
+**One red is expected until the next commit lands.** `test_c23` reports that `PROVENANCE` and
+`PACK_SOURCE` are still tracked files here — the defect the check exists to catch. It clears with
+`git rm --cached PROVENANCE PACK_SOURCE`; the `.gitignore` entries then keep them out.
 
 The navigation eval ships **three** question sets with **three different required outcomes**, and
 the second one is why the first is evidence rather than decoration:
