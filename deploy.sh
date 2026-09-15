@@ -181,7 +181,7 @@ for s in "${DEST_ONLY_STAMPS[@]}"; do STAMP_EXCLUDES+=(--exclude "/$s"); done
 
 # .git: a copy is not a checkout. /deploy.sh: rooted, so the copy cannot be a deploy source.
 # __pycache__/, *.pyc, .pytest_cache/: build residue, regenerated on first use in the destination.
-RSYNC_EXCLUDES=(--exclude ".git" --exclude "/deploy.sh" --exclude "__pycache__/" --exclude "*.pyc" --exclude ".pytest_cache/" "${STAMP_EXCLUDES[@]}")
+RSYNC_EXCLUDES=(--exclude ".git" --exclude "/deploy.sh" --exclude "__pycache__/" --exclude "*.pyc" --exclude ".pytest_cache/" --exclude "/COMMIT_MSG-*.txt" "${STAMP_EXCLUDES[@]}")
 for p in "${PRIVATE_WORKING_STATE[@]}"; do
   case "$p" in
   /*|*/*) RSYNC_EXCLUDES+=(--exclude "/$p") ;;   # rooted path: only that path
